@@ -1,15 +1,21 @@
-use std::{fmt::Display, io};
+use std::{collections::HashMap, fmt::Display, option::Option, path::PathBuf};
 
 use crossterm::event::KeyCode;
-use recept::{App, CommandList, book::Recept, ui::{Border, BorderStyle, ListLayout, Rect, Side, TextBuffer, TextLayout}};
+use recept::{App, CommandList, Config, ConfigLoader, Error, FolderWatcher, book::Recept, ui::{Border, BorderStyle, ListLayout, Rect, Side, TextBuffer, TextLayout}};
+use serde::{Deserialize, Serialize};
 
-fn main() -> io::Result<()> {
-    let app = ReceptApp::new();
+fn main() {
+    let app = match ReceptApp::new() {
+        Ok(app) => app,
+        Err(err) => {
+            println!("{err:?}");
+            return;
+        },
+    };
     match recept::run(app) {
         Ok(_) => (),
         Err(err) => println!("{err:?}"),
     }
-    Ok(())
 }
 
 const DEFAULT_RECEPT: &str = "Exempelrubrik
@@ -22,86 +28,6 @@ Gör så här:
 Dolor sit amet.
 Consectetur adipiscing elit. 
 Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.";
-
-const TESTRECEPT: &[&str] = &[
-    "Kladdkaka
-
-            Ca 8 bitar
-            Ugnstemperatur 200°C
-
-            Ingredienser
-
-            smör till formen 
-            ströbröd till formen
-            100 g smör
-            2 st ägg
-            2 1/2 dl strösocker
-            3 msk kakao
-            2 tsk vaniljsocker
-            1 1/2 dl vetemjöl
-            1 krm salt
-
-            /Till servering
-            florsocker till garnering
-            2 dl vispgrädde 
-            färska bär
-
-
-            Gör så här
-
-            Sätt ugnen på 200°C, under- och övervärme.
-
-            Smörj och bröa en form med löstagbar kant, ca 24 cm i diameter (för 8 bitar) eller spänn fast ett bakplåtspapper på botten.
-
-            Smält smöret i kastrull, låt svalna något.
-
-            Vispa ihop ägg och socker (använd inte en elvisp).
-
-            Blanda kakao, vaniljsocker, vetemjöl och salt i en bunke och rör ner i äggblandningen.
-
-            Tillsätt det smälta smöret och blanda försiktigt ihop till en jämn smet och häll sedan över smeten i formen.
-
-            Grädda mitt i ugnen i ca 10-15 minuter (öka eller minska tiden vid behov beroende på hur kladdig du vill ha den).
-
-            Ta ut kladdkakan och låt svalna.
-
-            Sikta florsocker över om så önskas.",
-    "Spaghetti carbonara
-    (Vår Kokbok)
-
-    1 portion
-
-    Ingredienser:
-    ca 70 g spaghetti
-    50 g rökt sidfläsk, skinka, bog eller bacon
-    1 äggula
-    nymalen svartpeppar
-    ¾-1 dl riven ost
-
-    Gör så här:
-    Koka spaghettin.
-    Strimla det rökta köttet och stek det knaprigt i en stekpanna.
-    Lägg den heta nykokta spaghettin i en varm djup tallrik, strö över köttet. Lägg äggulan i en fördjupning i mitten.
-    Mal över rikligt med peppar, strö över riven ost och blanda alltsammans på tallriken."
-    ,
-    "Spaghetti carbonara med ännu längre titel som inte får plats
-    (Vår Kokbok)
-
-    1 portion
-
-    Ingredienser:
-    ca 70 g spaghetti
-    50 g rökt sidfläsk, skinka, bog eller bacon
-    1 äggula
-    nymalen svartpeppar
-    ¾-1 dl riven ost
-
-    Gör så här:
-    Koka spaghettin.
-    Strimla det rökta köttet och stek det knaprigt i en stekpanna.
-    Lägg den heta nykokta spaghettin i en varm djup tallrik, strö över köttet. Lägg äggulan i en fördjupning i mitten.
-    Mal över rikligt med peppar, strö över riven ost och blanda alltsammans på tallriken."
-];
 
 enum Command {
     ListaNed,
@@ -117,7 +43,7 @@ enum Command {
     NyttRecept,
     SkapaRecept,
     ÖppnaSök,
-    VerkställSök,
+    StängSök,
 }
 
 impl Display for Command {
@@ -136,7 +62,7 @@ impl Display for Command {
             Command::NyttRecept => write!(f, "Nytt recept"),
             Command::SkapaRecept => write!(f, "Skapa"),
             Command::ÖppnaSök => write!(f, "Sök recept"),
-            Command::VerkställSök => write!(f, "Sök"),
+            Command::StängSök => write!(f, "Avsluta sökning"),
         }
     }
 }
@@ -148,34 +74,61 @@ enum UserMode {
     Sök(String),
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Clone)]
+struct ReceptConfig {
+    receptmapp: PathBuf,
+}
+
+impl Config for ReceptConfig {
+    fn new() -> Option<ReceptConfig> {
+        let receptmapp = rfd::FileDialog::new().set_title("Välj receptmapp").pick_folder()?;
+        Some(Self { receptmapp })
+    }
+}
+
 struct ReceptApp {
-    recept: Vec<Recept>,
+    recept: HashMap<PathBuf, Recept>,
     listval: usize,
     flikval: usize,
-    flikar: Vec<usize>,
+    filtrerad_lista: Vec<PathBuf>,
+    flikar: Vec<PathBuf>,
     mode: UserMode,
+    config: ConfigLoader<ReceptConfig>,
+    receptmapp: FolderWatcher,
 }
 
 impl ReceptApp {
-    pub fn new() -> Self {
-        let mut recept = Vec::new();
-        for source in TESTRECEPT {
-            let Some(tolkat) = Recept::try_parse(*source) else {
-                continue;
-            };
-            recept.push(tolkat);
+    pub fn new() -> Result<Self, Error> {
+        let mut config: ConfigLoader<ReceptConfig> = ConfigLoader::new("Receptkalkylator")?;
+        let receptmapp = FolderWatcher::new(config.get()?.receptmapp.clone())?;
+        let mut recept = HashMap::new();
+        for recept_path in receptmapp.files()? {
+            if let Ok(Some(tolkat)) = Recept::try_parse_file(&recept_path) {
+                recept.insert(recept_path, tolkat);
+            }
         }
-        Self { recept, listval: 0, flikval: 0, flikar: Vec::new(), mode: UserMode::Normal }
+        let filtrerad_lista = Self::filtrera_recept(&recept, None);
+        Ok(Self { recept, listval: 0, flikval: 0, flikar: Vec::new(), mode: UserMode::Normal, config, receptmapp, filtrerad_lista })
+    }
+
+    fn filtrera_recept(receptbank: &HashMap<PathBuf, Recept>, filter: Option<&str>) -> Vec<PathBuf> {
+        let mut träffar = Vec::new();
+        for (path, recept) in receptbank {
+            if recept.matches(filter) {
+                träffar.push(path.to_path_buf());
+            }
+        }
+        träffar
     }
     
     fn draw_recipes<T: TextBuffer>(&self, rect: Rect, buf: &mut T) -> std::io::Result<()> {
-        for (flik_i, (mut flik_rect, recept_i)) in rect.to_grid(self.flikar.len() as u16, 1, false).into_iter().zip(self.flikar.iter()).enumerate() {
+        for (flik_i, (mut flik_rect, recept_path)) in rect.to_grid(self.flikar.len() as u16, 1, false).into_iter().zip(self.flikar.iter()).enumerate() {
             if self.flikval == flik_i && self.flikar.len() > 1 && matches!(self.mode, UserMode::Normal){
                 Border::new(flik_rect, BorderStyle::THIN).render(buf)?;
             }
             flik_rect.limit_w(100, true);
             flik_rect.inset_mut(2, 2);
-            if let Some(recept) = self.recept.get(*recept_i) {
+            if let Some(recept) = self.recept.get(recept_path) {
                 recept.render(flik_rect, buf)?;
             }
         }
@@ -194,7 +147,7 @@ impl ReceptApp {
             rect.cut_mut(Side::Top, 2);
         }
         rect.cut_mut(Side::Right, 2);
-        ListLayout::new().with_items(self.recept.iter().map(|recept| recept.rubrik().to_string())).with_selected(self.listval).render(rect, buf)
+        ListLayout::new().with_items(self.filtrerad_lista.iter().map(|recept| self.recept.get(recept).unwrap().rubrik().to_string())).with_selected(self.listval).render(rect, buf)
     }
     
     fn draw_editor<T: TextBuffer>(&self, text: &str, mut rect: Rect, buf: &mut T) -> std::io::Result<()> {
@@ -252,7 +205,7 @@ impl App<Command> for ReceptApp {
             UserMode::SkapaRecept(_) => CommandList::new()
                 .command(KeyCode::Enter, Command::SkapaRecept),
             UserMode::Sök(_) => CommandList::new()
-                .command(KeyCode::Enter, Command::VerkställSök),
+                .command(KeyCode::Enter, Command::StängSök),
         }.hidden_ctrl(KeyCode::Char('c'), Command::Quit)
     }
     
@@ -264,15 +217,15 @@ impl App<Command> for ReceptApp {
             }
             Command::ListaUpp => self.listval = self.listval.wrapping_sub(1).min(self.recept.len().saturating_sub(1)),
             Command::Visa => if let Some(flik) = self.flikar.get_mut(self.flikval) {
-                *flik = self.listval;
+                *flik = self.filtrerad_lista.get(self.listval).unwrap().to_path_buf();
             } else if let Some(flik) = self.flikar.first_mut() {
-                *flik = self.listval;
+                *flik = self.filtrerad_lista.get(self.listval).unwrap().to_path_buf();
                 self.flikval = 0;
             } else {
-                self.flikar.push(self.listval);
+                self.flikar.push(self.filtrerad_lista.get(self.listval).unwrap().to_path_buf());
             },
             Command::VisaINyFlik => if self.flikar.len() < 4 {
-                self.flikar.push(self.listval);
+                self.flikar.push(self.filtrerad_lista.get(self.listval).unwrap().to_path_buf());
             },
             Command::FlikNästa => if !self.flikar.is_empty() {
                 self.flikval = (self.flikval + 1).min(self.flikar.len()) % self.flikar.len();
@@ -287,7 +240,30 @@ impl App<Command> for ReceptApp {
             Command::NyttRecept => self.mode = UserMode::SkapaRecept(DEFAULT_RECEPT.to_string()),
             Command::SkapaRecept => todo!(),
             Command::ÖppnaSök => self.mode = UserMode::Sök(String::new()),
-            Command::VerkställSök => self.mode = UserMode::Normal,
+            Command::StängSök => self.mode = UserMode::Normal,
         }
+    }
+    
+    fn refresh(&mut self) -> bool {
+        let mut redraw = false;
+        for event in self.receptmapp.changes() {
+            match event {
+                recept::FileEvent::Modify(path_buf) => {
+                    let Ok(Some(new)) = Recept::try_parse_file(&path_buf) else {
+                        continue;
+                    };
+                    *self.recept.entry(path_buf).or_default() = new;
+                    redraw = true;
+                },
+                recept::FileEvent::Delete(path_buf) => {
+                    self.recept.remove(&path_buf);
+                    redraw = true;
+                },
+            }
+        }
+        if redraw {
+            self.filtrerad_lista = Self::filtrera_recept(&self.recept, None);
+        }
+        redraw
     }
 }

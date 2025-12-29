@@ -1,10 +1,174 @@
-use std::{fmt::Display, io::stdout, panic::catch_unwind};
+use std::{fmt::Display, io::stdout, path::{Path, PathBuf}, sync::mpsc::Receiver, time::Duration};
 use crossterm::{ExecutableCommand, cursor, event::{self, KeyCode, KeyModifiers}, style::Print, terminal};
+use notify::Watcher;
 
 use crate::ui::{TextBuffer, TextLayout, VecBuffer};
 
 pub mod ui;
 pub mod book;
+
+pub struct FolderWatcher {
+    receiver: Receiver<Result<notify::Event, notify::Error>>,
+    path: PathBuf,
+    _watcher: notify::RecommendedWatcher,
+}
+
+impl FolderWatcher {
+    pub fn new(path: PathBuf) -> Result<Self, Error> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut _watcher = notify::recommended_watcher(sender)?;
+        _watcher
+            .watch(&path, notify::RecursiveMode::Recursive)?;
+
+        Ok(Self { receiver, path, _watcher })
+    }
+
+    pub fn changes(&self) -> Vec<FileEvent> {
+        let mut events = Vec::new();
+        for res in self.receiver.try_iter() {
+            let Ok(notify::Event { kind, paths, .. }) = res else {
+                continue;
+            };
+            for path in paths {
+                if !path.is_file() {
+                    continue;
+                }
+                events.push(match kind {
+                    notify::EventKind::Any => FileEvent::Modify(path),
+                    notify::EventKind::Access(_) => FileEvent::Modify(path),
+                    notify::EventKind::Create(_) => FileEvent::Modify(path),
+                    notify::EventKind::Modify(_) => FileEvent::Modify(path),
+                    notify::EventKind::Remove(_) => FileEvent::Delete(path),
+                    notify::EventKind::Other => FileEvent::Modify(path),
+                });
+            }
+        }
+        events
+    }
+    
+    pub fn files(&self) -> Result<Vec<PathBuf>, Error> {
+        let mut vec = Vec::new();
+        list_files(&mut vec, &self.path)?;
+        Ok(vec)
+    }
+}
+
+fn list_files(vec: &mut Vec<PathBuf>, path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        let paths = std::fs::read_dir(&path)?;
+        for path_result in paths {
+            let full_path = path_result?.path();
+            if full_path.is_dir() {
+                list_files(vec, &full_path)?
+            } else {
+                vec.push(full_path);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub enum FileEvent {
+    Modify(PathBuf),
+    Delete(PathBuf),
+}
+
+pub trait Config: Clone + PartialEq + serde::Serialize + for<'a> serde::Deserialize<'a> {
+    fn new() -> Option<Self>;
+}
+
+pub struct ConfigLoader<C: Config> {
+    config: C,
+    path: PathBuf,
+    receiver: Receiver<Result<notify::Event, notify::Error>>,
+    _watcher: notify::RecommendedWatcher,
+}
+
+impl<C: Config> ConfigLoader<C> {
+    pub fn new(ident: &str) -> Result<Self, Error> {
+        let project_dirs = directories::ProjectDirs::from(
+            "", 
+            "", 
+            ident
+        ).ok_or(Error::NoProjectDir)?;
+        let base_dir = project_dirs.config_dir().to_path_buf();
+        std::fs::create_dir_all(&base_dir)?;
+
+        let path = base_dir.join("config.toml");
+        let config = match Self::load(&path) {
+            Ok(Ok(config)) => config,
+            _ => C::new().ok_or(Error::CancelledByUser)?,
+        };
+        Self::save(&path, &config)?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut _watcher = notify::recommended_watcher(sender)?;
+        _watcher
+            .watch(&path, notify::RecursiveMode::NonRecursive)?;
+
+        Ok(Self { config, path, receiver, _watcher })
+    }
+
+    fn load(path: &Path) -> Result<Result<C, toml::de::Error>, std::io::Error> {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::fs::File::open(&path)?.read_to_string(&mut buf)?;
+        Ok(toml::from_str(&buf))
+    }
+
+    fn save(path: &Path, config: &C) -> Result<(), Error> {
+        if let Ok(file) = toml::to_string_pretty(config) {
+            std::fs::write(path, file)?;
+        }
+        Ok(())
+    }
+
+    pub fn set(&mut self, new: C) -> Result<(), Error> {
+        if new != self.config {
+            self.config = new;
+            Self::save(&self.path, &self.config)?;
+        }
+        Ok(())
+    }
+
+    pub fn get(&mut self) -> Result<&C, Error> {
+        for event in self.receiver.try_iter() {
+            let Ok(event) = event else {
+                continue;
+            };
+            for changed in event.paths {
+                if self.path != changed {
+                    continue;
+                }
+                if let Ok(Ok(new)) = Self::load(&self.path) {
+                    self.config = new;
+                }
+                Self::save(&self.path, &self.config)?;
+            }
+        }
+        Ok(&self.config)
+    }
+}
+
+#[derive(Debug)]
+pub enum Error {
+    CancelledByUser,
+    NoProjectDir,
+    Notify(notify::Error),
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<notify::Error> for Error {
+    fn from(err: notify::Error) -> Self {
+        Self::Notify(err)
+    }
+}
+
 
 fn init() -> std::io::Result<()> {
     stdout().execute(terminal::EnterAlternateScreen)?;
@@ -96,19 +260,14 @@ pub trait App<C: Display> {
     fn draw<T: TextBuffer>(&self, target: &mut T) -> std::io::Result<()>;
     fn commands(&self) -> CommandList<C>;
     fn execute_command(&mut self, command: C, quit: &mut bool);
+    fn refresh(&mut self) -> bool;
 }
 
-pub fn run<C: Display, A: App<C> + std::panic::UnwindSafe>(app: A) -> std::io::Result<()> {
+pub fn run<C: Display, A: App<C>>(app: A) -> std::io::Result<()> {
     init()?;
-    let result = catch_unwind(|| main_loop(app));
+    let result = main_loop(app);
     exit()?;
-
-    match result {
-        Ok(Err(err)) => println!("{err}"),
-        Err(_) => panic!("Hoppsan"),
-        _ => (),
-    }
-    Ok(())
+    result
 }
 
 fn main_loop<C: Display, A: App<C>>(mut app: A) -> std::io::Result<()> {
@@ -147,27 +306,30 @@ fn main_loop<C: Display, A: App<C>>(mut app: A) -> std::io::Result<()> {
             stdout().execute(cursor::MoveTo(0, 0))?.execute(Print(buf.to_string()))?;
             stdout().execute(terminal::EndSynchronizedUpdate)?;
         }
-        match event::read()? {
-            event::Event::Key(key_event) => for opt in commands.public.into_iter().chain(commands.hidden.into_iter()) {
-                let Some(CommandSignature { key, ctrl, command, .. }) = opt else {
-                    continue;
-                };
-                if 
-                    key_event.is_press() && 
-                    key_event.code.to_string().eq_ignore_ascii_case(&key.to_string()) && 
-                    (key_event.modifiers == KeyModifiers::CONTROL) == ctrl // CTRL status equal to that of command 
-                {
-                    redraw = true;
-                    let mut quit = false;
-                    app.execute_command(command, &mut quit);
-                    if quit {
-                        return Ok(());
+        if let Ok(can_read) = event::poll(Duration::from_secs(1)) && can_read {
+            match event::read()? {
+                event::Event::Key(key_event) => for opt in commands.public.into_iter().chain(commands.hidden.into_iter()) {
+                    let Some(CommandSignature { key, ctrl, command, .. }) = opt else {
+                        continue;
+                    };
+                    if 
+                        key_event.is_press() && 
+                        key_event.code.to_string().eq_ignore_ascii_case(&key.to_string()) && 
+                        (key_event.modifiers == KeyModifiers::CONTROL) == ctrl // CTRL status equal to that of command 
+                    {
+                        redraw = true;
+                        let mut quit = false;
+                        app.execute_command(command, &mut quit);
+                        if quit {
+                            return Ok(());
+                        }
                     }
-                }
-            },
-            event::Event::Resize(..) => redraw = true,
-            _ => ()
+                },
+                event::Event::Resize(..) => redraw = true,
+                _ => ()
+            }
         }
+        redraw = redraw | app.refresh();
     }
 }
 

@@ -265,6 +265,7 @@ mod tests {
         assert_eq!(parse_storhet("2dl"), Some((Storhet::värde(2.0).med_enhet("dl"), "".to_string())));
         assert_eq!(parse_storhet("200°C"), Some((Storhet::värde(200.0).med_enhet("°C"), "".to_string())));
         assert_eq!(parse_storhet("2 1/2 dl"), Some((Storhet::värde(2.5).med_enhet("dl"), "".to_string())));
+        assert_eq!(parse_storhet("1-2 1/2 dl"), Some((Storhet::intervall(1.0..2.5).med_enhet("dl"), "".to_string())));
         assert_eq!(parse_storhet("1,5 msk"), Some((Storhet::värde(1.5).med_enhet("msk"), "".to_string())));
         assert_eq!(parse_storhet("10 bitar"), Some((Storhet::värde(10.0).med_enhet("bitar"), "".to_string())));
         assert_eq!(parse_storhet("2.25 l"), Some((Storhet::värde(2.25).med_enhet("l"), "".to_string())));

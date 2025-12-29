@@ -1,4 +1,4 @@
-use std::{fmt::Display, ops::Range};
+use std::{fmt::Display, ops::Range, path::Path};
 
 use crate::ui::{Side, TextBuffer, TextLayout};
 
@@ -16,6 +16,13 @@ pub struct Recept {
 }
 
 impl Recept {
+    pub fn try_parse_file(path: &Path) -> Result<Option<Self>, crate::Error> {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::fs::File::open(path)?.read_to_string(&mut buf)?;
+        Ok(Self::try_parse(buf))
+    }
+
     pub fn try_parse<S: Into<String>>(source: S) -> Option<Self> {
         parse::recipe(source)
     }
@@ -86,6 +93,21 @@ impl Recept {
             steps.render(rect, buf)?;
         }
         Ok(())
+    }
+    
+    pub fn matches(&self, filter: Option<&str>) -> bool {
+        let Some(filter) = filter else {
+            return true;
+        };
+        if self.rubrik().to_lowercase().contains(filter) {
+            return true;
+        }
+        for ingrediens in &self.ingredienser {
+            if ingrediens.namn().to_lowercase().contains(filter) {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -229,6 +251,14 @@ impl Storhet {
 pub enum IngrediensPost {
     Ingrediens(Option<Storhet>, String),
     Underrubrik(String),
+}
+impl IngrediensPost {
+    fn namn(&self) -> &str {
+        match self {
+            IngrediensPost::Ingrediens(_, namn) => namn,
+            IngrediensPost::Underrubrik(namn) => namn,
+        }
+    }
 }
 
 pub fn ingrediens<S: Into<String>>(storhet: Option<Storhet>, namn: S) -> IngrediensPost {
