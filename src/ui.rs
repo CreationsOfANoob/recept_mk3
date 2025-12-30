@@ -3,6 +3,8 @@ use std::{fmt::{Debug, Display}, io::{Write, stdout}, mem::swap};
 use crossterm::{QueueableCommand, cursor, style::{self}, terminal};
 use unicode_segmentation::UnicodeSegmentation;
 
+const SPACE_256: &str = "                                                                                                                                                                                                                                                                ";
+
 pub struct BorderStyle {
     left: &'static str,
     right: &'static str,
@@ -205,27 +207,34 @@ impl Rect {
         self.w = new_w;
     }
     
-    pub fn to_grid(&self, mut w: u16, mut h: u16, transpose: bool) -> Vec<Rect> {
+    pub fn to_grid(&self, mut w: u16, mut h: u16, margin: u16, transpose: bool) -> Vec<Rect> {
         let mut rects = Vec::new();
+        
+        let w_margins = self.w.saturating_sub(w.saturating_sub(1) * margin) as f32;
+        let h_margins = self.h.saturating_sub(h.saturating_sub(1) * margin) as f32;
+
         if transpose {
             swap(&mut w, &mut h);
         }
+
         for y in 0..h {
             for x in 0..w {
-                let mut w = w as f32;
-                let mut h = h as f32;
                 let mut x = x as f32;
                 let mut y = y as f32;
-
+                let mut w = w as f32;
+                let mut h = h as f32;
                 if transpose {
                     swap(&mut x, &mut y);
                     swap(&mut w, &mut h);
                 }
-                let y0 = self.y + ((y / h) * self.h as f32) as u16;
-                let y1 = self.y + (((y + 1.0) / h) * self.h as f32) as u16;
+                let m_x = x as u16 * margin;
+                let m_y = y as u16 * margin;
+
+                let y0 = self.y + ((y / h) * h_margins) as u16 + m_y;
+                let y1 = self.y + (((y + 1.0) / h) * h_margins) as u16 + m_y;
                 
-                let x0 = self.x + ((x / w) * self.w as f32) as u16;
-                let x1 = self.x + (((x + 1.0) / w) * self.w as f32) as u16;
+                let x0 = self.x + ((x / w) as f32 * w_margins) as u16 + m_x;
+                let x1 = self.x + (((x + 1.0) / w) * w_margins) as u16 + m_x;
                 
                 rects.push(rect(x0, y0, x1 - x0, y1 - y0));
             }
@@ -250,19 +259,19 @@ pub enum Align {
     End,
 }
 
-#[allow(unused)]
-fn grapheme_count(value: &str) -> usize {
+
+pub fn grapheme_count(value: &str) -> usize {
     value.graphemes(true).count()
 }
 
 pub struct ListLayout {
     items: Vec<String>,
-    selected: usize,
+    selected: Option<usize>,
 }
 
 impl ListLayout {
     pub fn new() -> Self {
-        Self { items: Vec::new(), selected: 0 }
+        Self { items: Vec::new(), selected: None }
     }
     
     pub fn with_items(mut self, items: impl Iterator<Item = String>) -> Self {
@@ -274,7 +283,7 @@ impl ListLayout {
 
     pub fn with_selected(self, index: usize) -> Self {
         Self {
-            selected: index,
+            selected: Some(index),
             ..self
         }
     }
@@ -286,7 +295,9 @@ impl ListLayout {
             buf.write_line(rect.x + 2, y, text)?;
             y += 1;
         }
-        buf.write_line(rect.x, rect.y + self.selected as u16, ">")?;
+        if let Some(selected) = self.selected {
+            buf.write_line(rect.x, rect.y + selected as u16, "*")?;
+        }
         Ok(())
     }
 }
@@ -305,25 +316,38 @@ fn limit_line_width(s: &str, max_width: usize) -> String {
     output
 }
 
+#[derive(Default)]
 pub struct TextLayout {
     sections: Vec<Section>,
     /// Whether to indent line breaks
-    indent_break: bool,
-    indent_section: bool,
+    centered: bool,
+    wrap_mode: WrapMode,
 }
+
+#[derive(Clone, Copy, Default)]
+pub enum WrapMode {
+    #[default]
+    Word,
+    WordIndentBody(u8),
+    WordIndentFirstLine(u8),
+    CutOff { marker: &'static str, cut_start: bool },
+}
+
 impl TextLayout {
     pub fn new() -> Self {
-        Self { sections: Vec::new(), indent_break: false, indent_section: false }
+        Self::default()
     }
 
-    pub(crate) fn with_line_break_indentation(mut self) -> Self {
-        self.indent_break = true;
-        self
+    pub(crate) fn with_wrap_mode(self, wrap_mode: WrapMode) -> Self {
+        Self { wrap_mode, ..self }
     }
 
-    pub(crate) fn with_section_indentation(mut self) -> Self {
-        self.indent_section = true;
-        self
+    pub(crate) fn indent_body(self) -> Self {
+        self.with_wrap_mode(WrapMode::WordIndentBody(1))
+    }
+
+    pub(crate) fn indent_first_line(self) -> Self {
+        self.with_wrap_mode(WrapMode::WordIndentFirstLine(2))
     }
 
     fn with_section(mut self, section: Section) -> Self {
@@ -361,36 +385,67 @@ impl TextLayout {
     }
 
     pub fn render_cut(&self, rect: &mut Rect, buf: &mut impl TextBuffer) -> std::io::Result<()> {
-        let mut y = 0;
-        'section: for section in &self.sections {
-            for text in section.to_lines(rect.w as usize, self.indent_section, self.indent_break) {
-                buf.write_line(rect.x, rect.y + y, text)?;
-                y += 1;
-                if y >= rect.h {
-                    break 'section;
-                }
-            }
+        let lines: Vec<String> = self.sections.iter().flat_map(|section| section.to_lines(rect.w as usize, self.wrap_mode)).collect();
+        let h = (lines.len() as u16).min(rect.h);
+
+        let y_start = self.centered.then(|| (rect.h - h) / 2).unwrap_or_default();
+        let text_height = rect.h.saturating_sub(y_start).min(h);
+
+        for (line, y) in lines.into_iter().zip(0..text_height) {
+            let w = (grapheme_count(&line) as u16).min(rect.w);
+            let x = self.centered.then(|| (rect.w - w) / 2).unwrap_or_default();
+            buf.write_line(rect.x + x, rect.y + y_start + y, line)?;
         }
-        rect.cut_mut(Side::Top, y);
+        rect.cut_mut(Side::Top, y_start + text_height);
         Ok(())
     }
     
     pub fn render(&self, rect: Rect, buf: &mut impl TextBuffer) -> std::io::Result<()> {
         self.render_cut(&mut rect.clone(), buf)
     }
+    
+    pub fn centered(self) -> Self {
+        Self { centered: true, ..self }
+    }
 }
 
-fn line_break_string(s: &str, width: usize, indent_section: bool, indent_break: bool, spacing: u8) -> Vec<String> {
+fn line_break_string(s: &str, width: usize, wrap_mode: WrapMode, spacing: u8) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     let mut line_length = 0;
-    let new_line = if indent_break { " " } else { "" };
+    let new_line_body = match wrap_mode {
+        WrapMode::WordIndentBody(n) => &SPACE_256[0..n as usize],
+        _ => "",
+    };
+    let new_first_line = match wrap_mode {
+        WrapMode::WordIndentFirstLine(n) => &SPACE_256[0..n as usize],
+        _ => "",
+    };
     let mut last_line_broken = false;
 
     for input_line in s.lines() {
-        let indented_line = if last_line_broken && indent_section {
+        if let WrapMode::CutOff { marker, cut_start } = wrap_mode {
+            let marker_len = grapheme_count(marker);
+            let line_graphemes = input_line.graphemes(true);
+            let line_len = line_graphemes.clone().count();
+            if line_len > width {
+                let display_width = width.saturating_sub(marker_len);
+                let cutted = if cut_start {
+                    let mut chars = line_graphemes.skip(line_len.saturating_sub(display_width)).collect::<Vec<&str>>();
+                    chars.insert(0, marker);
+                    chars.join("")
+                } else {
+                    let mut remaining = line_graphemes.take(display_width).collect::<Vec<&str>>();
+                    remaining.push(marker);
+                    remaining.join("")
+                };
+                lines.push(cutted);
+            }
+            continue;
+        }
+        let indented_line = if last_line_broken {
             last_line_broken = false;
-            format!("  {input_line}")
+            format!("{new_first_line}{input_line}")
         } else {
             format!("{input_line}")
         };
@@ -404,24 +459,37 @@ fn line_break_string(s: &str, width: usize, indent_section: bool, indent_break: 
         words.push(&indented_line[last_start..]);
         
         // Fit string with wrapping
-        for word in words {
+        'word: for word in words {
+            let stripped_len = word.trim_end().graphemes(true).count();
             let graphemes = word.graphemes(true).collect::<Vec<&str>>();
             let length = graphemes.len();
-            if line_length + length > width {
+            
+            if line_length + stripped_len > width {
                 // Part overflows
                 last_line_broken = true;
-                if length > width {
-                    // Part is longer than can fit, split it on two rows
-                    line.push_str( &graphemes[0..width].join(""));
-                    lines.push(line);
-
-                    line = [new_line, &graphemes[width..].join("")].join("").to_string();
-                    line_length = grapheme_count(&line);
-                    continue;
+                if stripped_len > width {
+                    // Part is longer than can fit, split it between rows
+                    let mut remaining_graphemes = word.trim_end().graphemes(true);
+                    loop {
+                        let line_space = width.saturating_sub(line_length);
+                        for _ in 0..line_space {
+                            let Some(ch) = remaining_graphemes.next() else {
+                                continue;
+                            };
+                            line.push_str(ch);
+                        }
+                        if remaining_graphemes.clone().count() > 0 {
+                            lines.push(line);
+                            line = new_line_body.to_string();
+                            line_length = grapheme_count(&line);
+                        } else {
+                            continue 'word;
+                        }
+                    }
                 } else {
                     // New line
                     lines.push(line);
-                    line = new_line.to_string();
+                    line = new_line_body.to_string();
                     line_length = grapheme_count(&line);
                 }
             }
@@ -447,10 +515,10 @@ enum Section {
 }
 
 impl Section {
-    fn to_lines(&self, width: usize, indent_section: bool, indent_break: bool) -> Vec<String> {
+    fn to_lines(&self, width: usize, wrap: WrapMode) -> Vec<String> {
         match self {
-            Section::Heading(s) => line_break_string(&s.to_uppercase(), width, indent_section, indent_break, 0).iter().map(|s|s.to_string()).collect(),
-            Section::Text { text, spacing } => line_break_string(text, width, indent_section, indent_break, *spacing),
+            Section::Heading(s) => line_break_string(&s.to_uppercase(), width, wrap, 0).iter().map(|s|s.to_string()).collect(),
+            Section::Text { text, spacing } => line_break_string(text, width, wrap, *spacing),
             Section::Blank(num) => vec!["".to_string(); *num as usize],
             Section::Divider => vec![vec!["─"; width].join("")],
             // Section::Divider => vec![vec!["-"; width].join("")],
@@ -459,7 +527,9 @@ impl Section {
 }
 
 pub trait TextBuffer {
-    fn write_line<D: Display>(&mut self, x: u16, y: u16, text: D) -> std::io::Result<()>;
+    fn write_line<D: Display>(&mut self, x: u16, y: u16, line: D) -> std::io::Result<()>;
+    fn show_cursor(&mut self, x: u16, y: u16);
+    fn cursor(&self) -> Option<(u16, u16)>;
     fn safe_rect(&self) -> Rect;
     fn margin_rect(&self) -> Rect;
     fn clear(&mut self) -> std::io::Result<()>;
@@ -469,13 +539,14 @@ pub trait TextBuffer {
 pub struct TerminalBuffer {
     w: u16,
     h: u16,
-    bottom_margin: u16
+    bottom_margin: u16,
+    cursor: Option<(u16, u16)>
 }
 
 impl TerminalBuffer {
     pub fn new(bottom_margin: u16) -> Self {
         let (w, h) = terminal::size().unwrap();
-        Self { w, h, bottom_margin }
+        Self { w, h, bottom_margin, cursor: None }
     }
 }
 
@@ -491,6 +562,12 @@ impl TextBuffer for TerminalBuffer {
     }
     
     fn flush(&mut self) -> std::io::Result<()> {
+        if let Some((x, y)) = self.cursor {
+            stdout()
+                .queue(cursor::MoveTo(x, y))?
+                .queue(cursor::Show)?;
+            self.cursor = None;
+        }
         stdout().flush()
     }
     
@@ -506,6 +583,14 @@ impl TextBuffer for TerminalBuffer {
     fn margin_rect(&self) -> Rect {
         rect(0, self.h.saturating_sub(self.bottom_margin), self.w, self.bottom_margin)
     }
+    
+    fn show_cursor(&mut self, x: u16, y: u16) {
+        self.cursor = Some((x, y));
+    }
+    
+    fn cursor(&self) -> Option<(u16, u16)> {
+        self.cursor
+    }
 }
 
 #[derive(PartialEq)]
@@ -513,7 +598,8 @@ pub struct VecBuffer {
     text: Vec<String>,
     w: u16,
     h: u16,
-    bottom_margin: u16
+    bottom_margin: u16,
+    cursor: Option<(u16, u16)>,
 }
 
 impl std::fmt::Display for VecBuffer {
@@ -522,7 +608,9 @@ impl std::fmt::Display for VecBuffer {
             for x in 0..self.w as usize {
                 f.write_str(&self.text[y * self.w as usize + x])?;
             }
-            f.write_str("\r\n")?;
+            if y < self.h.saturating_sub(1) as usize {
+                f.write_str("\r\n")?;
+            }
         }
         Ok(())
     }
@@ -537,7 +625,7 @@ impl std::fmt::Debug for VecBuffer {
 impl VecBuffer {
     pub(crate) fn new(w: u16, h: u16, bottom_margin: u16) -> Self {
         let text = vec![String::from(" "); (w * h) as usize];
-        Self { text, w, h, bottom_margin }
+        Self { text, w, h, bottom_margin, cursor: None }
     }
 
     #[cfg(test)]
@@ -554,7 +642,7 @@ impl VecBuffer {
                 text.push(grapheme.to_string());
             }
         }
-        Some(Self { text, w: w as u16, h: h as u16, bottom_margin: 0 })
+        Some(Self { text, w: w as u16, h: h as u16, bottom_margin: 0, cursor: None })
     }
 }
 
@@ -585,11 +673,80 @@ impl TextBuffer for VecBuffer {
     fn margin_rect(&self) -> Rect {
         rect(0, self.h.saturating_sub(self.bottom_margin), self.w, self.bottom_margin)
     }
+    
+    fn show_cursor(&mut self, x: u16, y: u16) {
+        self.cursor = Some((x, y))
+    }
+    
+    fn cursor(&self) -> Option<(u16, u16)> {
+        self.cursor
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::ui::{Border, BorderStyle, Side, rect, VecBuffer};
+    use pretty_assertions::assert_eq;
+    use crate::ui::{Border, BorderStyle, Side, TextBuffer, TextLayout, VecBuffer, WrapMode, rect};
+
+    fn test_wrap_mode(wrap_mode: WrapMode, text: &str, w: u16, h: u16, spacing: u8) -> String {
+        let mut buf = VecBuffer::new(w, h, 0);
+        let rect = buf.safe_rect();
+        TextLayout::new().with_wrap_mode(wrap_mode).with_text(text.to_string(), spacing).render(rect, &mut buf).unwrap();
+        buf.to_string()
+    }
+
+    #[test]
+    fn line_wrap_cut() {
+        let text = [
+            "Denna teststräng innehåller en första mening på 9 ord.",
+            "Den tredje raden i teststrängen är lite annorlunda. Apa, Flaggstångspolermedelsfabriksarbetarefackförbundsordföranderåd.",
+            "Slutligen en sista rad."].join("\n");
+        assert_eq!(test_wrap_mode(WrapMode::Word, &text, 10, 5, 0), [
+            "Denna     ",
+            "teststräng",
+            "innehåller",
+            "en första ",
+            "mening på ",
+        ].join("\r\n"));
+        assert_eq!(test_wrap_mode(WrapMode::WordIndentBody(2), &text, 20, 10, 0), [
+            "Denna teststräng    ",
+            "  innehåller en     ",
+            "  första mening på 9",
+            "  ord.              ",
+            "Den tredje raden i  ",
+            "  teststrängen är   ",
+            "  lite annorlunda.  ",
+            "  Apa, Flaggstångspo",
+            "  lermedelsfabriksar",
+            "  betarefackförbunds"
+        ].join("\r\n"));
+        assert_eq!(test_wrap_mode(WrapMode::WordIndentFirstLine(2), &text, 20, 10, 0), [
+            "Denna teststräng    ",
+            "innehåller en första",
+            "mening på 9 ord.    ",
+            "  Den tredje raden i",
+            "teststrängen är lite",
+            "annorlunda. Apa, Fla",
+            "ggstångspolermedelsf",
+            "abriksarbetarefackfö",
+            "rbundsordföranderåd.",
+            "  Slutligen en sista",
+        ].join("\r\n"));
+        assert_eq!(test_wrap_mode(WrapMode::CutOff { marker: "", cut_start: false }, &text, 10, 5, 0), [
+            "Denna test",
+            "Den tredje",
+            "Slutligen ",
+            "          ",
+            "          ",
+        ].join("\r\n"));
+        assert_eq!(test_wrap_mode(WrapMode::CutOff { marker: "...", cut_start: true }, &text, 15, 5, 0), [
+            "...ng på 9 ord.",
+            "...dföranderåd.",
+            "...n sista rad.",
+            "               ",
+            "               ",
+        ].join("\r\n"));
+    }
 
     #[test]
     fn border() {
@@ -654,19 +811,19 @@ mod tests {
     #[test]
     fn to_grid() {
         let a = rect(0, 0, 10, 6);
-        assert_eq!(a.to_grid(2, 2, false), vec![
+        assert_eq!(a.to_grid(2, 2, 0, false), vec![
             rect(0, 0, 5, 3),
             rect(5, 0, 5, 3),
             rect(0, 3, 5, 3),
             rect(5, 3, 5, 3),
         ]);
-        assert_eq!(a.to_grid(2, 2, true), vec![
+        assert_eq!(a.to_grid(2, 2, 0, true), vec![
             rect(0, 0, 5, 3),
             rect(0, 3, 5, 3),
             rect(5, 0, 5, 3),
             rect(5, 3, 5, 3),
         ]);
-        assert_eq!(a.to_grid(5, 2, false), vec![
+        assert_eq!(a.to_grid(5, 2, 0, false), vec![
             rect(0, 0, 2, 3),
             rect(2, 0, 2, 3),
             rect(4, 0, 2, 3),
@@ -677,6 +834,14 @@ mod tests {
             rect(4, 3, 2, 3),
             rect(6, 3, 2, 3),
             rect(8, 3, 2, 3),
+        ]);
+
+        let a = rect(0, 0, 12, 6);
+        assert_eq!(a.to_grid(2, 2, 2, false), vec![
+            rect(0, 0, 5, 2),
+            rect(7, 0, 5, 2),
+            rect(0, 4, 5, 2),
+            rect(7, 4, 5, 2),
         ]);
 
     }

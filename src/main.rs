@@ -1,7 +1,7 @@
-use std::{collections::HashMap, fmt::Display, option::Option, path::PathBuf};
+use std::{collections::HashMap, fmt::Display, io::stdout, option::Option, path::PathBuf};
 
-use crossterm::event::KeyCode;
-use recept::{App, CommandList, Config, ConfigLoader, Error, FolderWatcher, book::Recept, ui::{Border, BorderStyle, ListLayout, Rect, Side, TextBuffer, TextLayout}};
+use crossterm::{QueueableCommand, cursor, event::KeyCode};
+use recept::{App, CommandList, Config, ConfigLoader, Error, FolderWatcher, book::Recept, ui::{Border, BorderStyle, ListLayout, Rect, Side, TextBuffer, TextLayout, grapheme_count}};
 use serde::{Deserialize, Serialize};
 
 fn main() {
@@ -17,6 +17,69 @@ fn main() {
         Err(err) => println!("{err:?}"),
     }
 }
+
+const TITEL: &str = 
+"██░  ██░ ██████░ ██░  ██░
+██░ ██░░██░░░░██░██░ ██░░
+█████░░ ██░   ██░█████░░ 
+██░░██░ ██░   ██░██░░██░ 
+██░  ██░░██████░░██░  ██░
+ ░░   ░░  ░░░░░░  ░░   ░░
+                         
+██████░  ██████░ ██░  ██░
+██░░░██░██░░░░██░██░ ██░░
+██████░░██░   ██░█████░░ 
+██░░░██░██░   ██░██░░██░ 
+██████░░░██████░░██░  ██░
+ ░░░░░░   ░░░░░░  ░░   ░░"
+
+// "██╗  ██╗ ██████╗ ██╗  ██╗
+// ██║ ██╔╝██╔═══██╗██║ ██╔╝
+// █████╔╝ ██║   ██║█████╔╝ 
+// ██╔═██╗ ██║   ██║██╔═██╗ 
+// ██║  ██╗╚██████╔╝██║  ██╗
+// ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝
+                         
+// ██████╗  ██████╗ ██╗  ██╗
+// ██╔══██╗██╔═══██╗██║ ██╔╝
+// ██████╔╝██║   ██║█████╔╝ 
+// ██╔══██╗██║   ██║██╔═██╗ 
+// ██████╔╝╚██████╔╝██║  ██╗
+// ╚═════╝  ╚═════╝ ╚═╝  ╚═╝"
+
+// "▝▛ ▞▘     ▝▛   
+//  ▙▞  ▗▞▀▚▖ ▌ ▗▀
+//  ▛▚  ▌   ▐ ▙▄▘ 
+// ▗▙ ▙▖▝▚▄▞▘▗▙ ▚▄
+
+// ▝▛▀▚      ▝▛   
+//  ▙▄▞ ▗▞▀▚▖ ▌ ▗▀
+//  ▌ ▐ ▌   ▐ ▙▄▘ 
+// ▗▙▄▞ ▝▚▄▞▘▗▙ ▚▄
+// "
+
+
+// r" █████   ████          █████     
+// ░░███   ███░          ░░███      
+//  ░███  ███     ██████  ░███ █████
+//  ░███████     ███░░███ ░███░░███ 
+//  ░███░░███   ░███ ░███ ░██████░  
+//  ░███ ░░███  ░███ ░███ ░███░░███ 
+//  █████ ░░████░░██████  ████ █████
+// ░░░░░   ░░░░  ░░░░░░  ░░░░ ░░░░░ 
+                                 
+                                 
+                                 
+//  ███████████           █████     
+// ░░███░░░░░███         ░░███      
+//  ░███    ░███  ██████  ░███ █████
+//  ░██████████  ███░░███ ░███░░███ 
+//  ░███░░░░░███░███ ░███ ░██████░  
+//  ░███    ░███░███ ░███ ░███░░███ 
+//  ███████████ ░░██████  ████ █████
+// ░░░░░░░░░░░   ░░░░░░  ░░░░ ░░░░░ "
+
+;
 
 const DEFAULT_RECEPT: &str = "Exempelrubrik
 
@@ -36,14 +99,12 @@ enum Command {
     VisaINyFlik,
     FlikNästa,
     FlikFörra,
-    Quit,
     StängFlik,
     Lås,
     LåsUpp,
     NyttRecept,
     SkapaRecept,
     ÖppnaSök,
-    StängSök,
 }
 
 impl Display for Command {
@@ -53,7 +114,6 @@ impl Display for Command {
             Command::ListaUpp => write!(f, "Föreg."),
             Command::Visa => write!(f, "Visa recept"),
             Command::VisaINyFlik => write!(f, "Ny flik"),
-            Command::Quit => write!(f, "Avsluta"),
             Command::FlikNästa => write!(f, "Nästa flik"),
             Command::FlikFörra => write!(f, "Föreg. flik"),
             Command::StängFlik => write!(f, "Stäng flik"),
@@ -62,16 +122,17 @@ impl Display for Command {
             Command::NyttRecept => write!(f, "Nytt recept"),
             Command::SkapaRecept => write!(f, "Skapa"),
             Command::ÖppnaSök => write!(f, "Sök recept"),
-            Command::StängSök => write!(f, "Avsluta sökning"),
         }
     }
 }
 
+#[derive(Default, Clone)]
 enum UserMode {
     Locked,
+    #[default]
     Normal,
     SkapaRecept(String),
-    Sök(String),
+    Sök,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Clone)]
@@ -92,8 +153,8 @@ struct ReceptApp {
     flikval: usize,
     filtrerad_lista: Vec<PathBuf>,
     flikar: Vec<PathBuf>,
+    sökfilter: String,
     mode: UserMode,
-    config: ConfigLoader<ReceptConfig>,
     receptmapp: FolderWatcher,
 }
 
@@ -107,30 +168,32 @@ impl ReceptApp {
                 recept.insert(recept_path, tolkat);
             }
         }
-        let filtrerad_lista = Self::filtrera_recept(&recept, None);
-        Ok(Self { recept, listval: 0, flikval: 0, flikar: Vec::new(), mode: UserMode::Normal, config, receptmapp, filtrerad_lista })
+        let mut slef = Self { recept, listval: 0, flikval: 0, flikar: Vec::new(), mode: UserMode::Normal, receptmapp, filtrerad_lista: Vec::new(), sökfilter: String::new() };
+        slef.filtrera_recept();
+        Ok(slef)
     }
 
-    fn filtrera_recept(receptbank: &HashMap<PathBuf, Recept>, filter: Option<&str>) -> Vec<PathBuf> {
+    fn filtrera_recept(&mut self) {
         let mut träffar = Vec::new();
-        for (path, recept) in receptbank {
-            if recept.matches(filter) {
-                träffar.push(path.to_path_buf());
+        for (path, recept) in &self.recept {
+            if recept.matches(&self.sökfilter) {
+                träffar.push((path.to_path_buf(), recept.rubrik()));
             }
         }
-        träffar
+        träffar.sort_by_key(|(_, n)| *n);
+        self.filtrerad_lista = träffar.into_iter().map(|(r, _)| r).collect();
     }
     
     fn draw_recipes<T: TextBuffer>(&self, rect: Rect, buf: &mut T) -> std::io::Result<()> {
-        for (flik_i, (mut flik_rect, recept_path)) in rect.to_grid(self.flikar.len() as u16, 1, false).into_iter().zip(self.flikar.iter()).enumerate() {
-            flik_rect.limit_w(100, true);
+        for (flik_i, (mut flik_rect, recept_path)) in rect.to_grid(self.flikar.len() as u16, 1, 1, false).into_iter().zip(self.flikar.iter()).enumerate() {
+            flik_rect.limit_w(120, true);
             if self.flikval == flik_i && self.flikar.len() > 1 && matches!(self.mode, UserMode::Normal){
                 Border::new(flik_rect, BorderStyle::THIN).render(buf)?;
             }
             if flik_i > 0 && self.flikar.len() > 1 && matches!(self.mode, UserMode::Locked){
                 Border::new(flik_rect.cut(Side::Left, 1).moved(-1, 0), BorderStyle::LIGHT_DOTTED_LINE_V).render(buf)?;
             }
-            flik_rect.inset_mut(2, 2);
+            flik_rect.inset_mut(2, 1);
             if let Some(recept) = self.recept.get(recept_path) {
                 recept.render(flik_rect, buf)?;
             }
@@ -140,17 +203,23 @@ impl ReceptApp {
 
     fn draw_sidebar<T: TextBuffer>(&self, mut rect: Rect, buf: &mut T) -> std::io::Result<()> {
         Border::new(rect.cut_mut(Side::Right, 1), BorderStyle::LIGHT_DOTTED_LINE_V).render(buf)?;
-        rect.inset_mut(0, 1);
-        if let UserMode::Sök(söksträng) = &self.mode && let Some((mut search, list)) = rect.split(Side::Top, 3) {
+        if let UserMode::Sök = &self.mode && let Some((mut search, list)) = rect.split(Side::Top, 3) {
             search.cut_mut(Side::Right, 1);
             Border::new(search, BorderStyle::THIN).render(buf)?;
             search.inset_mut(2, 1);
-            TextLayout::new().with_single_line(if söksträng == "" { "Sök recept..." } else { söksträng }).render(search, buf)?;
+            search.cut_mut(Side::Right, 1);
+            TextLayout::new().with_single_line(if self.sökfilter == "" { "Sök i recept..." } else { &self.sökfilter }).render(search, buf)?;
+            buf.show_cursor(search.x + (grapheme_count(&self.sökfilter) as u16).min(search.w), search.y);
+            stdout().queue(cursor::Show)?;
             rect = list;
-            rect.cut_mut(Side::Top, 2);
         }
+        rect.inset_mut(0, 1);
         rect.cut_mut(Side::Right, 2);
-        ListLayout::new().with_items(self.filtrerad_lista.iter().map(|recept| self.recept.get(recept).unwrap().rubrik().to_string())).with_selected(self.listval).render(rect, buf)
+        let mut lista = ListLayout::new().with_items(self.filtrerad_lista.iter().map(|recept| self.recept.get(recept).unwrap().rubrik().to_string()));
+        if !matches!(self.mode, UserMode::Sök) {
+            lista = lista.with_selected(self.listval);
+        }
+        lista.render(rect, buf)
     }
     
     fn draw_editor<T: TextBuffer>(&self, text: &str, mut rect: Rect, buf: &mut T) -> std::io::Result<()> {
@@ -164,12 +233,16 @@ impl ReceptApp {
 impl App<Command> for ReceptApp {
     fn draw<T: TextBuffer>(&self, buf: &mut T) -> std::io::Result<()> {
         let mut window_rect = buf.safe_rect();
-        window_rect.inset_mut(1, 1);
+        window_rect.inset_mut(0, 0);
 
         match &self.mode {
             UserMode::Locked => self.draw_recipes(window_rect, buf)?,
-            UserMode::Normal | UserMode::Sök(_) => if let Some((sidebar, recipe_rect)) = window_rect.split(Side::Left, 30) {
-                self.draw_recipes(recipe_rect, buf)?;
+            UserMode::Normal | UserMode::Sök { .. } => if let Some((sidebar, recipe_rect)) = window_rect.split(Side::Left, 30) {
+                if self.flikar.is_empty() {
+                    TextLayout::new().with_text(TITEL.to_string(), 0).centered().render(recipe_rect, buf)?;
+                } else {
+                    self.draw_recipes(recipe_rect, buf)?;
+                }
                 self.draw_sidebar(sidebar, buf)?;
             } else {
                 TextLayout::new().with_text("Fönstret är för litet!".to_string(), 0).render(window_rect, buf)?;
@@ -207,43 +280,45 @@ impl App<Command> for ReceptApp {
                 .hidden(KeyCode::Left, Command::FlikFörra),
             UserMode::SkapaRecept(_) => CommandList::new()
                 .command(KeyCode::Enter, Command::SkapaRecept),
-            UserMode::Sök(_) => CommandList::new()
-                .command(KeyCode::Enter, Command::StängSök),
-        }.hidden_ctrl(KeyCode::Char('c'), Command::Quit)
+            UserMode::Sök => CommandList::new(),
+        }
     }
     
-    fn execute_command(&mut self, command: Command, quit: &mut bool) {
+    fn execute_command(&mut self, command: Command) {
         match command {
-            Command::Quit => *quit = true,
-            Command::ListaNed => if !self.recept.is_empty() { 
-                self.listval = (self.listval + 1).min(self.recept.len()) % self.recept.len();
-            }
-            Command::ListaUpp => self.listval = self.listval.wrapping_sub(1).min(self.recept.len().saturating_sub(1)),
-            Command::Visa => if let Some(flik) = self.flikar.get_mut(self.flikval) {
-                *flik = self.filtrerad_lista.get(self.listval).unwrap().to_path_buf();
-            } else if let Some(flik) = self.flikar.first_mut() {
-                *flik = self.filtrerad_lista.get(self.listval).unwrap().to_path_buf();
-                self.flikval = 0;
-            } else {
-                self.flikar.push(self.filtrerad_lista.get(self.listval).unwrap().to_path_buf());
+            Command::ListaNed => increment_wrap(&mut self.listval, self.recept.len()),
+            Command::ListaUpp => decrement_wrap(&mut self.listval, self.recept.len()),
+            Command::Visa => {
+                let Some(recept) = self.filtrerad_lista.get(self.listval).cloned() else {
+                    return;
+                };
+                if let Some(flik) = self.flikar.get_mut(self.flikval) {
+                    *flik = recept;
+                } else if let Some(flik) = self.flikar.first_mut() {
+                    *flik = recept;
+                    self.flikval = 0;
+                } else {
+                    self.flikar.push(recept);
+                }
             },
-            Command::VisaINyFlik => if self.flikar.len() < 4 {
-                self.flikar.push(self.filtrerad_lista.get(self.listval).unwrap().to_path_buf());
+            Command::VisaINyFlik => if self.flikar.len() < 4 && let Some(recept) = self.filtrerad_lista.get(self.listval).cloned() {
+                self.flikar.push(recept);
+                self.flikval = self.flikar.len().saturating_sub(1);
             },
-            Command::FlikNästa => if !self.flikar.is_empty() {
-                self.flikval = (self.flikval + 1).min(self.flikar.len()) % self.flikar.len();
-            },
-            Command::FlikFörra => self.flikval = self.flikval.wrapping_sub(1).min(self.flikar.len().saturating_sub(1)),
-            Command::StängFlik => if self.flikval <= self.flikar.len() {
-                self.flikar.remove(self.flikval);
+            Command::FlikNästa => increment_wrap(&mut self.flikval, self.flikar.len()),
+            Command::FlikFörra => decrement_wrap(&mut self.flikval, self.flikar.len()),
+            Command::StängFlik => if !self.flikar.is_empty() {
+                self.flikar.remove(self.flikval.min(self.flikar.len() - 1));
                 self.flikval = self.flikval.min(self.flikar.len().saturating_sub(1));
             },
             Command::Lås => self.mode = UserMode::Locked,
             Command::LåsUpp => self.mode = UserMode::Normal,
             Command::NyttRecept => self.mode = UserMode::SkapaRecept(DEFAULT_RECEPT.to_string()),
             Command::SkapaRecept => todo!(),
-            Command::ÖppnaSök => self.mode = UserMode::Sök(String::new()),
-            Command::StängSök => self.mode = UserMode::Normal,
+            Command::ÖppnaSök => {
+                self.mode = UserMode::Sök;
+                self.listval = 0;
+            }
         }
     }
     
@@ -265,8 +340,48 @@ impl App<Command> for ReceptApp {
             }
         }
         if redraw {
-            self.filtrerad_lista = Self::filtrera_recept(&self.recept, None);
+            self.filtrera_recept();
         }
         redraw
+    }
+    
+    fn edit_text(&mut self, edit_event: recept::TextEditEvent) {
+        let mut exit_search = false;
+        match self.mode {
+            UserMode::Sök => match edit_event {
+                recept::TextEditEvent::Char(ch) => self.sökfilter.push(ch),
+                recept::TextEditEvent::Backspace => {
+                    self.sökfilter.pop();
+                },
+                recept::TextEditEvent::Enter => exit_search = true,
+                recept::TextEditEvent::Delete => self.sökfilter = String::new(),
+                _ => ()
+            },
+            _ => ()
+        }
+        self.filtrera_recept();
+        if exit_search {
+            self.mode = UserMode::Normal;
+        }
+    }
+    
+    fn is_editing_text(&self) -> bool {
+        matches!(self.mode, UserMode::Sök)
+    }
+}
+
+fn increment_wrap(i: &mut usize, len: usize) {
+    if len == 0 {
+        *i = 0;
+    } else {
+        *i = (*i + 1).min(len) % len;
+    }
+}
+
+fn decrement_wrap(i: &mut usize, len: usize) {
+    if len == 0 {
+        *i = 0;
+    } else {
+        *i = (i.wrapping_sub(1)).min(len) % len;
     }
 }

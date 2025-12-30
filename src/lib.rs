@@ -1,5 +1,5 @@
 use std::{fmt::Display, io::stdout, path::{Path, PathBuf}, sync::mpsc::Receiver, time::Duration};
-use crossterm::{ExecutableCommand, cursor, event::{self, KeyCode, KeyModifiers}, style::Print, terminal};
+use crossterm::{ExecutableCommand, QueueableCommand, cursor, event::{self, KeyCode, KeyEvent, KeyModifiers}, style::Print, terminal};
 use notify::Watcher;
 
 use crate::ui::{TextBuffer, TextLayout, VecBuffer};
@@ -256,11 +256,24 @@ impl<C: Display> CommandList<C> {
     }
 }
 
+pub enum TextEditEvent {
+    Char(char),
+    Left,
+    Right,
+    Up,
+    Down,
+    Backspace,
+    Enter,
+    Delete,
+}
+
 pub trait App<C: Display> {
     fn draw<T: TextBuffer>(&self, target: &mut T) -> std::io::Result<()>;
     fn commands(&self) -> CommandList<C>;
-    fn execute_command(&mut self, command: C, quit: &mut bool);
+    fn execute_command(&mut self, command: C);
     fn refresh(&mut self) -> bool;
+    fn edit_text(&mut self, edit_event: TextEditEvent);
+    fn is_editing_text(&self) -> bool;
 }
 
 pub fn run<C: Display, A: App<C>>(app: A) -> std::io::Result<()> {
@@ -285,8 +298,9 @@ fn main_loop<C: Display, A: App<C>>(mut app: A) -> std::io::Result<()> {
             command_bar.inset_mut(1, 0);
 
             buf.clear()?;
+            stdout().queue(cursor::Hide)?;
             app.draw(&mut buf)?;
-            for (index, slot) in command_bar.to_grid(5, 2, true).into_iter().enumerate() {
+            for (index, slot) in command_bar.to_grid(5, 2, 0, true).into_iter().enumerate() {
                 let Some(opt) = commands.public.get(index) else {
                     break;
                 };
@@ -302,26 +316,41 @@ fn main_loop<C: Display, A: App<C>>(mut app: A) -> std::io::Result<()> {
             }
             buf.flush()?;
 
-            stdout().execute(terminal::BeginSynchronizedUpdate)?;
-            stdout().execute(cursor::MoveTo(0, 0))?.execute(Print(buf.to_string()))?;
-            stdout().execute(terminal::EndSynchronizedUpdate)?;
+            stdout()
+                .execute(terminal::BeginSynchronizedUpdate)?
+                .execute(cursor::MoveTo(0, 0))?
+                .execute(Print(buf.to_string()))?
+                .execute(cursor::Hide)?;
+            if let Some((x, y)) = buf.cursor() {
+                stdout()
+                    .execute(cursor::MoveTo(x, y))?
+                    .execute(cursor::Show)?;
+            }
+            stdout()
+                .execute(terminal::EndSynchronizedUpdate)?;
         }
         if let Ok(can_read) = event::poll(Duration::from_secs(1)) && can_read {
             match event::read()? {
-                event::Event::Key(key_event) => for opt in commands.public.into_iter().chain(commands.hidden.into_iter()) {
-                    let Some(CommandSignature { key, ctrl, command, .. }) = opt else {
-                        continue;
-                    };
-                    if 
-                        key_event.is_press() && 
-                        key_event.code.to_string().eq_ignore_ascii_case(&key.to_string()) && 
-                        (key_event.modifiers == KeyModifiers::CONTROL) == ctrl // CTRL status equal to that of command 
-                    {
+                event::Event::Key(key_event) => {
+                    if event_is_quit(key_event) {
+                        return Ok(());
+                    }
+                    if app.is_editing_text() && let Some(edit_event) = text_edit_event(key_event) {
+                        app.edit_text(edit_event);
                         redraw = true;
-                        let mut quit = false;
-                        app.execute_command(command, &mut quit);
-                        if quit {
-                            return Ok(());
+                    } else {
+                        for opt in commands.public.into_iter().chain(commands.hidden.into_iter()) {
+                            let Some(CommandSignature { key, ctrl, command, .. }) = opt else {
+                                continue;
+                            };
+                            if 
+                                key_event.is_press() && 
+                                key_event.code.to_string().eq_ignore_ascii_case(&key.to_string()) && 
+                                (key_event.modifiers == KeyModifiers::CONTROL) == ctrl // CTRL status equal to that of command 
+                            {
+                                redraw = true;
+                                app.execute_command(command);
+                            }
                         }
                     }
                 },
@@ -330,6 +359,27 @@ fn main_loop<C: Display, A: App<C>>(mut app: A) -> std::io::Result<()> {
             }
         }
         redraw = redraw | app.refresh();
+    }
+}
+
+fn event_is_quit(key_event: event::KeyEvent) -> bool {
+    matches!(key_event, KeyEvent { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL, ..})
+}
+
+fn text_edit_event(key_event: event::KeyEvent) -> Option<TextEditEvent> {
+    if key_event.is_release() {
+        return None;
+    }
+    match key_event.code {
+        KeyCode::Backspace => Some(TextEditEvent::Backspace),
+        KeyCode::Enter => Some(TextEditEvent::Enter),
+        KeyCode::Left => Some(TextEditEvent::Left),
+        KeyCode::Right => Some(TextEditEvent::Right),
+        KeyCode::Up => Some(TextEditEvent::Up),
+        KeyCode::Down => Some(TextEditEvent::Down),
+        KeyCode::Delete => Some(TextEditEvent::Delete),
+        KeyCode::Char(s) => Some(TextEditEvent::Char(s)),
+        _ => None,
     }
 }
 

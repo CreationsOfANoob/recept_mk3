@@ -64,17 +64,20 @@ impl Recept {
             self.tillagningstid().map(|tid| format!("Tillagningstid {tid}"))
         ].into_iter().flatten().collect::<Vec<String>>().join(". ");
 
-        TextLayout::new()
+        let mut rubrikavsnitt = TextLayout::new()
             .with_header(self.rubrik())
             .with_space(1)
-            .with_divider()
-            .with_single_line(&extra_info)
-            .with_divider()
-            .with_space(1)
-            .render_cut(&mut rect, buf)?;
+            .with_divider();
+
+        if extra_info != "" {
+            rubrikavsnitt = rubrikavsnitt
+                .with_single_line(&extra_info)
+                .with_divider();
+        }
+        rubrikavsnitt.with_space(1).render_cut(&mut rect, buf)?;
 
         let ingredients = TextLayout::new()
-            .with_line_break_indentation()
+            .indent_body()
             .with_items(self.ingredienser(), 0)
             .with_space(2);
 
@@ -87,7 +90,7 @@ impl Recept {
             steps.render(steps_rect, buf)?;
         } else {
             let steps = TextLayout::new()
-                .with_section_indentation()
+                .indent_first_line()
                 .with_items(self.steg(), 0);
             ingredients.render_cut(&mut rect, buf)?;
             steps.render(rect, buf)?;
@@ -95,19 +98,26 @@ impl Recept {
         Ok(())
     }
     
-    pub fn matches(&self, filter: Option<&str>) -> bool {
-        let Some(filter) = filter else {
-            return true;
-        };
-        if self.rubrik().to_lowercase().contains(filter) {
+    pub fn matches(&self, filter: &str) -> bool {
+        if filter == "" {
             return true;
         }
-        for ingrediens in &self.ingredienser {
-            if ingrediens.namn().to_lowercase().contains(filter) {
-                return true;
+        let filter = filter.to_lowercase();
+        let parts = filter.split_whitespace();
+        // Kolla först om rubriken matchar alla delar i söksträngen
+        if parts.clone().all(|part| self.rubrik().to_lowercase().contains(part)) {
+            // Isåfall har vi en träff
+            return true;
+        }
+        // Annars, kolla ingredienserna
+        for part in parts {
+            if self.ingredienser().iter().all(|ing| !ing.namn().to_lowercase().contains(part)) {
+                // Ingen ingrediens matchar den här delen i söksträngen
+                return false;
             }
         }
-        false
+        // Alla delar av söksträngen matchade åtminstone en ingrediens.
+        true
     }
 }
 
