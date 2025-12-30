@@ -232,6 +232,10 @@ impl Rect {
         }
         rects
     }
+    
+    pub fn moved(&self, x: i16, y: i16) -> Rect {
+        Self { x: self.x.saturating_add_signed(x), y: self.y.saturating_add_signed(y), ..*self }
+    }
 }
 
 fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {

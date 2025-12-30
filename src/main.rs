@@ -123,10 +123,13 @@ impl ReceptApp {
     
     fn draw_recipes<T: TextBuffer>(&self, rect: Rect, buf: &mut T) -> std::io::Result<()> {
         for (flik_i, (mut flik_rect, recept_path)) in rect.to_grid(self.flikar.len() as u16, 1, false).into_iter().zip(self.flikar.iter()).enumerate() {
+            flik_rect.limit_w(100, true);
             if self.flikval == flik_i && self.flikar.len() > 1 && matches!(self.mode, UserMode::Normal){
                 Border::new(flik_rect, BorderStyle::THIN).render(buf)?;
             }
-            flik_rect.limit_w(100, true);
+            if flik_i > 0 && self.flikar.len() > 1 && matches!(self.mode, UserMode::Locked){
+                Border::new(flik_rect.cut(Side::Left, 1).moved(-1, 0), BorderStyle::LIGHT_DOTTED_LINE_V).render(buf)?;
+            }
             flik_rect.inset_mut(2, 2);
             if let Some(recept) = self.recept.get(recept_path) {
                 recept.render(flik_rect, buf)?;
