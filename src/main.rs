@@ -1,7 +1,7 @@
-use std::{collections::HashMap, fmt::Display, io::stdout, option::Option, path::PathBuf};
+use std::{collections::HashMap, fmt::Display, option::Option, path::PathBuf};
 
-use crossterm::{QueueableCommand, cursor, event::KeyCode};
-use recept::{App, CommandList, Config, ConfigLoader, Error, FolderWatcher, book::Recept, ui::{Border, BorderStyle, ListLayout, Rect, Side, TextBuffer, TextLayout, grapheme_count}};
+use crossterm::event::KeyCode;
+use recept::{App, CommandList, Config, ConfigLoader, TextEditor, Error, FolderWatcher, book::Recept, ui::{Border, BorderStyle, ListLayout, Rect, Side, TextBuffer, TextLayout}};
 use serde::{Deserialize, Serialize};
 
 fn main() {
@@ -131,8 +131,8 @@ enum UserMode {
     Locked,
     #[default]
     Normal,
-    SkapaRecept(String),
-    Sök,
+    SkapaRecept(TextEditor),
+    Sök(TextEditor),
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Clone)]
@@ -202,31 +202,36 @@ impl ReceptApp {
     }
 
     fn draw_sidebar<T: TextBuffer>(&self, mut rect: Rect, buf: &mut T) -> std::io::Result<()> {
-        Border::new(rect.cut_mut(Side::Right, 1), BorderStyle::LIGHT_DOTTED_LINE_V).render(buf)?;
-        if let UserMode::Sök = &self.mode && let Some((mut search, list)) = rect.split(Side::Top, 3) {
-            search.cut_mut(Side::Right, 1);
+        Border::new(rect.cut_mut(Side::Right, 1).with_cut(Side::Bottom, 1), BorderStyle::LIGHT_DOTTED_LINE_V).render(buf)?;
+        if let UserMode::Sök(textedit) = &self.mode && let Some((mut search, list)) = rect.split(Side::Top, 3) {
+            search.inset_mut(1, 0);
             Border::new(search, BorderStyle::THIN).render(buf)?;
             search.inset_mut(2, 1);
             search.cut_mut(Side::Right, 1);
-            TextLayout::new().with_single_line(if self.sökfilter == "" { "Sök i recept..." } else { &self.sökfilter }).render(search, buf)?;
-            buf.show_cursor(search.x + (grapheme_count(&self.sökfilter) as u16).min(search.w), search.y);
-            stdout().queue(cursor::Show)?;
+            textedit.render("Sök recept...", search, buf)?;
             rect = list;
+        } else {
+            rect.cut_mut(Side::Top, 1);
         }
-        rect.inset_mut(0, 1);
-        rect.cut_mut(Side::Right, 2);
+        rect.inset_mut(1, 0);
+        rect.cut_mut(Side::Left, 1);
+        if self.sökfilter != "" || matches!(self.mode, UserMode::Sök(_)) {
+            TextLayout::new().with_text(format!("Sökresultat för \"{}\":", self.sökfilter), 0).render_cut(&mut rect, buf)?;
+            rect.cut_mut(Side::Top, 1);
+        }
+        rect.cut_mut(Side::Right, 1);
         let mut lista = ListLayout::new().with_items(self.filtrerad_lista.iter().map(|recept| self.recept.get(recept).unwrap().rubrik().to_string()));
-        if !matches!(self.mode, UserMode::Sök) {
+        if !matches!(self.mode, UserMode::Sök(_)) {
             lista = lista.with_selected(self.listval);
         }
-        lista.render(rect, buf)
+        lista.render(rect.moved(-1, 0), buf)
     }
     
-    fn draw_editor<T: TextBuffer>(&self, text: &str, mut rect: Rect, buf: &mut T) -> std::io::Result<()> {
+    fn draw_editor<T: TextBuffer>(&self, text: &TextEditor, mut rect: Rect, buf: &mut T) -> std::io::Result<()> {
         rect.inset_mut(2, 2);
         Border::new(rect, BorderStyle::THIN).render(buf)?;
         rect.inset_mut(3, 2);
-        TextLayout::new().with_text(text.to_string(), 0).render(rect, buf)
+        text.render(DEFAULT_RECEPT, rect, buf)
     }
 }
 
@@ -280,14 +285,14 @@ impl App<Command> for ReceptApp {
                 .hidden(KeyCode::Left, Command::FlikFörra),
             UserMode::SkapaRecept(_) => CommandList::new()
                 .command(KeyCode::Enter, Command::SkapaRecept),
-            UserMode::Sök => CommandList::new(),
+            UserMode::Sök(_) => CommandList::new(),
         }
     }
     
     fn execute_command(&mut self, command: Command) {
         match command {
-            Command::ListaNed => increment_wrap(&mut self.listval, self.recept.len()),
-            Command::ListaUpp => decrement_wrap(&mut self.listval, self.recept.len()),
+            Command::ListaNed => increment_wrap(&mut self.listval, self.filtrerad_lista.len()),
+            Command::ListaUpp => decrement_wrap(&mut self.listval, self.filtrerad_lista.len()),
             Command::Visa => {
                 let Some(recept) = self.filtrerad_lista.get(self.listval).cloned() else {
                     return;
@@ -313,10 +318,12 @@ impl App<Command> for ReceptApp {
             },
             Command::Lås => self.mode = UserMode::Locked,
             Command::LåsUpp => self.mode = UserMode::Normal,
-            Command::NyttRecept => self.mode = UserMode::SkapaRecept(DEFAULT_RECEPT.to_string()),
+            Command::NyttRecept => self.mode = UserMode::SkapaRecept(TextEditor::default()),
             Command::SkapaRecept => todo!(),
             Command::ÖppnaSök => {
-                self.mode = UserMode::Sök;
+                self.mode = UserMode::Sök(TextEditor::default().single_line_mode());
+                self.sökfilter = String::new();
+                self.filtrera_recept();
                 self.listval = 0;
             }
         }
@@ -347,15 +354,12 @@ impl App<Command> for ReceptApp {
     
     fn edit_text(&mut self, edit_event: recept::TextEditEvent) {
         let mut exit_search = false;
-        match self.mode {
-            UserMode::Sök => match edit_event {
-                recept::TextEditEvent::Char(ch) => self.sökfilter.push(ch),
-                recept::TextEditEvent::Backspace => {
-                    self.sökfilter.pop();
-                },
-                recept::TextEditEvent::Enter => exit_search = true,
-                recept::TextEditEvent::Delete => self.sökfilter = String::new(),
-                _ => ()
+        match &mut self.mode {
+            UserMode::Sök(editor) => {
+                if editor.edit(edit_event) {
+                    exit_search = true;
+                }
+                self.sökfilter = editor.to_string();
             },
             _ => ()
         }
@@ -366,7 +370,7 @@ impl App<Command> for ReceptApp {
     }
     
     fn is_editing_text(&self) -> bool {
-        matches!(self.mode, UserMode::Sök)
+        matches!(self.mode, UserMode::Sök(_))
     }
 }
 

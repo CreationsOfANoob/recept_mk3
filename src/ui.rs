@@ -160,6 +160,7 @@ impl Rect {
         self.y += inset_h;
     }
 
+    #[must_use]
     pub fn cut(&self, side: Side, amount: u16) -> Rect {
         let mut new_old = *self;
         new_old.cut_mut(side, amount)
@@ -245,6 +246,12 @@ impl Rect {
     pub fn moved(&self, x: i16, y: i16) -> Rect {
         Self { x: self.x.saturating_add_signed(x), y: self.y.saturating_add_signed(y), ..*self }
     }
+    
+    pub fn with_cut(&self, side: Side, amount: u16) -> Rect {
+        let mut new = *self;
+        new.cut_mut(side, amount);
+        new
+    }
 }
 
 fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
@@ -289,31 +296,20 @@ impl ListLayout {
     }
     
     pub fn render<T: TextBuffer>(&self, rect: Rect, buf: &mut T) -> std::io::Result<()> {
-        let mut y = rect.y;
-        for (item, _) in self.items.iter().zip(0..rect.h) {
-            let text = limit_line_width(item, rect.w.saturating_sub(2) as usize);
-            buf.write_line(rect.x + 2, y, text)?;
-            y += 1;
+        let mut text = String::new();
+        for (item, y) in self.items.iter().zip(0..rect.h as usize) {
+            if y > 0 {
+                text.push_str("\n");
+            }
+            if self.selected == Some(y) {
+                text.push_str("* ");
+            } else {
+                text.push_str(" ");
+            }
+            text.push_str(item);
         }
-        if let Some(selected) = self.selected {
-            buf.write_line(rect.x, rect.y + selected as u16, "*")?;
-        }
-        Ok(())
+        TextLayout::new().with_text(text, 0).with_wrap_mode(WrapMode::CutOff { marker: "...", cut_start: false }).render(rect, buf)
     }
-}
-
-fn limit_line_width(s: &str, max_width: usize) -> String {
-    let single_line = s.lines().next().unwrap_or_default();
-    let mut graphemes = single_line.graphemes(true);
-    let num_graphemes = graphemes.clone().count();
-    let mut output = String::new();
-    if num_graphemes > max_width {
-        output.push_str(&graphemes.by_ref().take(max_width.saturating_sub(3) as usize).collect::<Vec<&str>>().join(""));
-        output.push_str("...");
-    } else {
-        output.push_str(single_line);
-    }
-    output
 }
 
 #[derive(Default)]
@@ -338,7 +334,7 @@ impl TextLayout {
         Self::default()
     }
 
-    pub(crate) fn with_wrap_mode(self, wrap_mode: WrapMode) -> Self {
+    pub fn with_wrap_mode(self, wrap_mode: WrapMode) -> Self {
         Self { wrap_mode, ..self }
     }
 
@@ -428,9 +424,9 @@ fn line_break_string(s: &str, width: usize, wrap_mode: WrapMode, spacing: u8) ->
             let marker_len = grapheme_count(marker);
             let line_graphemes = input_line.graphemes(true);
             let line_len = line_graphemes.clone().count();
-            if line_len > width {
+            lines.push(if line_len > width {
                 let display_width = width.saturating_sub(marker_len);
-                let cutted = if cut_start {
+                if cut_start {
                     let mut chars = line_graphemes.skip(line_len.saturating_sub(display_width)).collect::<Vec<&str>>();
                     chars.insert(0, marker);
                     chars.join("")
@@ -438,9 +434,10 @@ fn line_break_string(s: &str, width: usize, wrap_mode: WrapMode, spacing: u8) ->
                     let mut remaining = line_graphemes.take(display_width).collect::<Vec<&str>>();
                     remaining.push(marker);
                     remaining.join("")
-                };
-                lines.push(cutted);
-            }
+                }
+            } else {
+                input_line.to_string()
+            });
             continue;
         }
         let indented_line = if last_line_broken {
@@ -469,14 +466,21 @@ fn line_break_string(s: &str, width: usize, wrap_mode: WrapMode, spacing: u8) ->
                 last_line_broken = true;
                 if stripped_len > width {
                     // Part is longer than can fit, split it between rows
-                    let mut remaining_graphemes = word.trim_end().graphemes(true);
+                    let mut remaining_graphemes = graphemes.into_iter();
+                    let mut i = 0;
                     loop {
                         let line_space = width.saturating_sub(line_length);
                         for _ in 0..line_space {
+                            if i >= stripped_len && line_length >= width {
+                                // Don't keep whitespace on end of line
+                                break;
+                            }
                             let Some(ch) = remaining_graphemes.next() else {
-                                continue;
+                                break;
                             };
                             line.push_str(ch);
+                            line_length += 1;
+                            i += 1;
                         }
                         if remaining_graphemes.clone().count() > 0 {
                             lines.push(line);
@@ -696,7 +700,29 @@ mod tests {
     }
 
     #[test]
-    fn line_wrap_cut() {
+    fn line_wrap_singleline() {
+        let text = "Teststrängen innehåller bara en rad.";
+        assert_eq!(test_wrap_mode(WrapMode::Word, &text, 10, 5, 0), [
+            "Teststräng",
+            "en        ",
+            "innehåller",
+            "bara en   ",
+            "rad.      ",
+        ].join("\r\n"));
+        assert_eq!(test_wrap_mode(WrapMode::CutOff { marker: "...", cut_start: true }, &text, 10, 5, 0), [
+            "...en rad.",
+            "          ",
+            "          ",
+            "          ",
+            "          ",
+        ].join("\r\n"));
+        assert_eq!(test_wrap_mode(WrapMode::CutOff { marker: "...", cut_start: true }, &text, 40, 1, 0), 
+            "Teststrängen innehåller bara en rad.    "
+        );
+    }
+
+    #[test]
+    fn line_wrap_multiline() {
         let text = [
             "Denna teststräng innehåller en första mening på 9 ord.",
             "Den tredje raden i teststrängen är lite annorlunda. Apa, Flaggstångspolermedelsfabriksarbetarefackförbundsordföranderåd.",

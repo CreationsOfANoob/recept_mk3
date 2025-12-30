@@ -1,8 +1,9 @@
 use std::{fmt::Display, io::stdout, path::{Path, PathBuf}, sync::mpsc::Receiver, time::Duration};
 use crossterm::{ExecutableCommand, QueueableCommand, cursor, event::{self, KeyCode, KeyEvent, KeyModifiers}, style::Print, terminal};
 use notify::Watcher;
+use unicode_segmentation::UnicodeSegmentation;
 
-use crate::ui::{TextBuffer, TextLayout, VecBuffer};
+use crate::ui::{TextBuffer, TextLayout, VecBuffer, WrapMode, grapheme_count};
 
 pub mod ui;
 pub mod book;
@@ -392,5 +393,367 @@ fn format_key(key: KeyCode) -> String {
         KeyCode::Char(' ') => "SPACE".to_string(),
         KeyCode::Enter => "RETUR".to_string(),
         other => other.to_string().to_uppercase(),
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct TextEditor {
+    lines: Vec<String>,
+    line_i: usize,
+    grapheme_i: usize,
+    single_line_mode: bool,
+}
+
+impl TextEditor {
+    pub fn from_string(s: String) -> Self {
+        let lines = s.lines().map(|s| s.to_string()).collect();
+        Self { lines, ..Default::default() }
+    }
+
+    pub fn set_cursor(&mut self, x: usize, y: usize) {
+        self.grapheme_i = x;
+        self.line_i = y;
+    }
+
+    /// Returns true if enter was pressed and single line mode is active
+    pub fn edit(&mut self, edit_event: TextEditEvent) -> bool {
+        // Sanitize indices
+        self.line_i = self.line_i.min(self.lines.len().saturating_sub(1));
+        if let Some(line) = self.lines.get(self.line_i) {
+            self.grapheme_i = self.grapheme_i.min(grapheme_count(line));
+        } else {
+            self.grapheme_i = 0;
+        }
+        match edit_event {
+            TextEditEvent::Char(ch) => {
+                let ch = ch.to_string();
+                if self.lines.is_empty() {
+                    self.lines.push(String::new());
+                }
+                let line = self.lines.get_mut(self.line_i).unwrap();
+                let mut graphemes = line.graphemes(true).collect::<Vec<&str>>();
+                graphemes.insert(self.grapheme_i, &ch);
+                self.grapheme_i += 1;
+                *line = graphemes.join("");
+            },
+            TextEditEvent::Left => if self.grapheme_i == 0 {
+                if self.line_i != 0 {
+                    self.line_i -= 1;
+                    if let Some(line) = self.lines.get(self.line_i) {
+                        self.grapheme_i = grapheme_count(line);
+                    }
+                }
+            } else {
+                self.grapheme_i -= 1;
+            },
+            TextEditEvent::Right => {
+                self.grapheme_i += 1;
+                if let Some(line) = self.lines.get(self.line_i) {
+                    let line_len = grapheme_count(line);
+                    if self.grapheme_i > line_len {
+                        if self.lines.len() > self.line_i + 1 {
+                            self.line_i += 1;
+                            self.grapheme_i = 0;
+                        } else {
+                            self.grapheme_i = line_len;
+                        }
+                    }
+                }
+            },
+            TextEditEvent::Up => {
+                if self.line_i + 1 > self.lines.len() {
+                    self.line_i = self.lines.len().saturating_sub(1);
+                } else if self.line_i == 0 {
+                    self.grapheme_i = 0;
+                } else {
+                    self.line_i -= 1;
+                }
+            },
+            TextEditEvent::Down => {
+                if self.line_i + 1 < self.lines.len() {
+                    self.line_i += 1;
+                } else if let Some(line) = self.lines.get(self.lines.len().saturating_sub(1)) {
+                    self.line_i = self.lines.len().saturating_sub(1);
+                    self.grapheme_i = grapheme_count(line);
+                } else {
+                    self.grapheme_i = 0;
+                    self.line_i = 0;
+                }
+            },
+            TextEditEvent::Backspace => if let Some(curr_line) = self.lines.get(self.line_i).cloned() {
+                if self.grapheme_i == 0 {
+                    if let Some(prev_line_i) = self.line_i.checked_sub(1) && let Some(prev_line) = self.lines.get_mut(self.line_i - 1) {
+                        self.grapheme_i = grapheme_count(prev_line);
+                        prev_line.push_str(&curr_line);
+                        self.lines.remove(self.line_i);
+                        self.line_i = prev_line_i;
+                    }
+                } else {
+                    let mut graphemes = curr_line.graphemes(true).collect::<Vec<&str>>();
+                    self.grapheme_i -= 1;
+                    graphemes.remove(self.grapheme_i);
+                    self.lines[self.line_i] = graphemes.join("");
+                }
+            },
+            TextEditEvent::Enter => {
+                if self.single_line_mode {
+                    return true;
+                }
+                let new_line_i = (self.line_i + 1).min(self.lines.len());
+                self.lines.insert(new_line_i, String::new());
+                if let Some(old_line) = self.lines.get(self.line_i).cloned() {
+                    let graphemes = old_line.graphemes(true).collect::<Vec<&str>>();
+                    let (pre, post) = graphemes.split_at(self.grapheme_i);
+                    self.lines[self.line_i] = pre.join("");
+                    for string in post {
+                        self.lines[new_line_i].push_str(string);
+                    }
+                }
+                self.grapheme_i = 0;
+                self.line_i = new_line_i;
+            },
+            TextEditEvent::Delete => if let Some(line) = self.lines.get(self.line_i) {
+                let mut graphemes = line.graphemes(true).collect::<Vec<&str>>();
+                if self.grapheme_i == graphemes.len() {
+                    if self.line_i + 1 < self.lines.len() {
+                        let (pre, post) = self.lines.split_at_mut(self.line_i + 1);
+                        pre[self.line_i].push_str(&post[0]);
+                        self.lines.remove(self.line_i + 1);
+                    }
+                } else {
+                    graphemes.remove(self.grapheme_i);
+                    self.lines[self.line_i] = graphemes.join("");
+                }
+            },
+        }
+        false
+    }
+    
+    pub fn render<T: TextBuffer>(&self, placeholder: &str, rect: ui::Rect, buf: &mut T) -> std::io::Result<()> {
+        let text = self.to_string();
+        TextLayout::new().with_wrap_mode(WrapMode::CutOff { marker: "...", cut_start: false }).with_text(if text == "" { placeholder.to_string() } else { text }, 0).render(rect, buf)?;
+        buf.show_cursor(rect.x + (self.grapheme_i as u16).min(rect.w), rect.y + (self.line_i as u16).min(rect.h));
+        Ok(())
+    }
+    
+    pub fn single_line_mode(self) -> TextEditor {
+        Self { single_line_mode: true, ..self }
+    }
+}
+
+impl Display for TextEditor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, line) in self.lines.iter().enumerate() {
+            f.write_str(line)?;
+            if i + 1 < self.lines.len() {
+                f.write_str("\n")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_text_edit {
+    use crate::{TextEditor, TextEditEvent};
+
+    #[test]
+    fn add_character() {
+        let mut a = TextEditor::from_string([
+            "Hej,",
+            "Jag tänkte säga det."
+        ].join("\n"));
+        a.edit(TextEditEvent::Char('a'));
+        assert_eq!(a.to_string(), [
+            "aHej,",
+            "Jag tänkte säga det."
+        ].join("\n"));
+        a.edit(TextEditEvent::Char(' '));
+        assert_eq!(a.to_string(), [
+            "a Hej,",
+            "Jag tänkte säga det."
+        ].join("\n"));
+        a.set_cursor(10, 0);
+        a.edit(TextEditEvent::Char('!'));
+        assert_eq!(a.to_string(), [
+            "a Hej,!",
+            "Jag tänkte säga det."
+        ].join("\n"));
+        a.edit(TextEditEvent::Down);
+        a.edit(TextEditEvent::Char('o'));
+        assert_eq!(a.to_string(), [
+            "a Hej,!",
+            "Jag tänokte säga det."
+        ].join("\n"));
+        a.edit(TextEditEvent::Down);
+        a.edit(TextEditEvent::Char('Y'));
+        assert_eq!(a.to_string(), [
+            "a Hej,!",
+            "Jag tänokte säga det.Y"
+        ].join("\n"));
+        a.edit(TextEditEvent::Up);
+        a.edit(TextEditEvent::Char('ô'));
+        assert_eq!(a.to_string(), [
+            "a Hej,!ô",
+            "Jag tänokte säga det.Y"
+        ].join("\n"));
+        a.edit(TextEditEvent::Up);
+        a.edit(TextEditEvent::Char('📜'));
+        assert_eq!(a.to_string(), [
+            "📜a Hej,!ô",
+            "Jag tänokte säga det.Y"
+        ].join("\n"));
+    }
+
+    #[test]
+    fn backspace() {
+        let mut a = TextEditor::from_string([
+            "Mer text!",
+            "",
+            "Nu finns det blankrader."
+        ].join("\n"));
+        a.edit(TextEditEvent::Backspace);
+        assert_eq!(a.to_string(), [
+            "Mer text!",
+            "",
+            "Nu finns det blankrader."
+        ].join("\n"));
+        a.edit(TextEditEvent::Left);
+        a.edit(TextEditEvent::Backspace);
+        assert_eq!(a.to_string(), [
+            "Mer text!",
+            "",
+            "Nu finns det blankrader."
+        ].join("\n"));
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Backspace);
+        assert_eq!(a.to_string(), [
+            "er text!",
+            "",
+            "Nu finns det blankrader."
+        ].join("\n"));
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Backspace);
+        assert_eq!(a.to_string(), [
+            "e text!",
+            "",
+            "Nu finns det blankrader."
+        ].join("\n"));
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Backspace);
+        assert_eq!(a.to_string(), [
+            "e text!",
+            "Nu finns det blankrader."
+        ].join("\n"));
+    }
+
+    #[test]
+    fn enter() {
+        let mut a = TextEditor::default();
+        a.edit(TextEditEvent::Enter);
+        assert_eq!(a.to_string(), "");
+        a.edit(TextEditEvent::Enter);
+        assert_eq!(a.to_string(), "\n");
+
+        let mut a = TextEditor::from_string([
+            "Nu är det dags att testa returknappen!",
+            "I teststrängen finns blankrader.",
+            "",
+            "Åtminstone en."
+        ].join("\n"));
+        a.edit(TextEditEvent::Enter);
+        assert_eq!(a.to_string(), [
+            "",
+            "Nu är det dags att testa returknappen!",
+            "I teststrängen finns blankrader.",
+            "",
+            "Åtminstone en."
+        ].join("\n"));
+
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Down);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Enter);
+        assert_eq!(a.to_string(), [
+            "",
+            "Nu är det dags att testa returknappen!",
+            "I ",
+            "teststrängen finns blankrader.",
+            "",
+            "Åtminstone en."
+        ].join("\n"));
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Enter);
+        assert_eq!(a.to_string(), [
+            "",
+            "Nu är det dags att testa returknappen!",
+            "I ",
+            "t",
+            "eststrängen finns blankrader.",
+            "",
+            "Åtminstone en."
+        ].join("\n"));
+        a.edit(TextEditEvent::Down);
+        a.edit(TextEditEvent::Down);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Right);
+        a.edit(TextEditEvent::Enter);
+        assert_eq!(a.to_string(), [
+            "",
+            "Nu är det dags att testa returknappen!",
+            "I ",
+            "t",
+            "eststrängen finns blankrader.",
+            "",
+            "Åtminstone en.",
+            ""
+        ].join("\n"));
+    }
+
+    #[test]
+    fn delete() {
+        let mut a = TextEditor::from_string([
+            "Gillar inte detta testfall.",
+            "",
+            "Kommer nog inte själv att behöva detta."
+        ].join("\n"));
+        a.edit(TextEditEvent::Delete);
+        assert_eq!(a.to_string(), [
+            "illar inte detta testfall.",
+            "",
+            "Kommer nog inte själv att behöva detta."
+        ].join("\n"));
+        a.edit(TextEditEvent::Down);
+        a.edit(TextEditEvent::Delete);
+        assert_eq!(a.to_string(), [
+            "illar inte detta testfall.",
+            "Kommer nog inte själv att behöva detta."
+        ].join("\n"));
+        a.edit(TextEditEvent::Down);
+        a.edit(TextEditEvent::Delete);
+        assert_eq!(a.to_string(), [
+            "illar inte detta testfall.",
+            "Kommer nog inte själv att behöva detta."
+        ].join("\n"));
     }
 }
