@@ -23,6 +23,11 @@ const MÅTTENHETER: &[&str] = &[
     "°F",
     "°",
 ];
+pub(crate) const TEMPERATURENHETER: &[&str] = &[
+    "°C",
+    "°F",
+    "°",
+];
 
 const CIRKAMARKÖR: &[&str] = &[
     "ungefär",
@@ -38,6 +43,7 @@ const STEGMARKÖR: &[&str] = &[
     "gör så här",
     "steg",
     "instruktioner",
+    "tillagning",
 ];
 
 fn clean_numbers(s: &str) -> String {
@@ -170,23 +176,29 @@ fn parse_number_remainder(s: &str) -> Option<(f32, String)> {
     None
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ParseError {
+    TomtDokument,
+    SaknarIngredienser,
+    SaknarSteg,
+}
+
+#[derive(Debug)]
 enum ParseStage {
-    Rubrik,
     Info,
     Ingredienser,
     Steg,
 }
 
-pub fn recipe<S: Into<String>>(source: S) -> Option<Recept> {
-    let mut stage = ParseStage::Rubrik;
+pub fn recipe<S: Into<String>>(source: S) -> Result<Recept, ParseError> {
+    let mut stage = ParseStage::Info;
     let mut recept = Recept::default();
+    let source = source.into();
+    let mut lines = source.trim().lines();
+    recept.namn = lines.next().ok_or(ParseError::TomtDokument)?.to_string();
 
-    for line in source.into().trim().lines() {
+    for line in lines {
         match stage {
-            ParseStage::Rubrik => {
-                recept.namn = line.to_string();
-                stage = ParseStage::Info;
-            },
             ParseStage::Info => {
                 if let Some(ugnstemp) = parse_as_temperature(line) {
                     recept.ugnstemperatur = Some(ugnstemp);
@@ -224,7 +236,11 @@ pub fn recipe<S: Into<String>>(source: S) -> Option<Recept> {
             },
         }
     }
-    Some(recept)
+    match stage {
+        ParseStage::Info => Err(ParseError::SaknarIngredienser),
+        ParseStage::Ingredienser => Err(ParseError::SaknarSteg),
+        ParseStage::Steg => Ok(recept),
+    }
 }
 
 fn parse_as_källa(line: &str) -> Option<String> {
@@ -233,7 +249,7 @@ fn parse_as_källa(line: &str) -> Option<String> {
 }
 
 fn parse_as_time(line: &str) -> Option<Storhet> {
-    if line.to_ascii_lowercase().contains("tid") {
+    if line.to_lowercase().contains("tid") {
         return Some(parse_storhet(line)?.0);
     }
     None
@@ -248,11 +264,11 @@ fn parse_as_temperature(line: &str) -> Option<Storhet> {
 }
 
 fn ingredients_start(line: &str) -> bool {
-    line.to_ascii_lowercase().contains(INGREDIENSMARKÖR)
+    line.to_lowercase().contains(INGREDIENSMARKÖR)
 }
 
 fn instructions_start(line: &str) -> bool {
-    STEGMARKÖR.iter().any(|markör|line.to_ascii_lowercase().contains(markör))
+    STEGMARKÖR.iter().any(|markör|line.to_lowercase().contains(markör))
 }
 
 #[cfg(test)]

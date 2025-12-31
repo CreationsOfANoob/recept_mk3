@@ -43,6 +43,16 @@ impl BorderStyle {
         bottom: " ",
         bottom_right: " ",
     };
+    pub const LINE_H: Self = BorderStyle {
+        left: " ",
+        right: " ",
+        top_left: "─",
+        top: "─",
+        top_right: "─",
+        bottom_left: "─",
+        bottom: "─",
+        bottom_right: "─",
+    };
     pub const LIGHT_DOTTED_LINE_V: Self = BorderStyle {
         left: ".",
         right: ".",
@@ -51,6 +61,16 @@ impl BorderStyle {
         top_right: ".",
         bottom_left: ".",
         bottom: " ",
+        bottom_right: ".",
+    };
+    pub const LIGHT_DOTTED: Self = BorderStyle {
+        left: ".",
+        right: ".",
+        top_left: ".",
+        top: ".",
+        top_right: ".",
+        bottom_left: ".",
+        bottom: ".",
         bottom_right: ".",
     };
     pub const HEAVY_DOTTED_LINE_V: Self = BorderStyle {
@@ -250,6 +270,12 @@ impl Rect {
     pub fn with_cut(&self, side: Side, amount: u16) -> Rect {
         let mut new = *self;
         new.cut_mut(side, amount);
+        new
+    }
+    
+    pub fn with_inset(self, w: u16, h: u16) -> Rect {
+        let mut new = self;
+        new.inset_mut(w, h);
         new
     }
 }

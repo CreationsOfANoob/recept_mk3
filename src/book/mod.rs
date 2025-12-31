@@ -1,10 +1,12 @@
 use std::{fmt::Display, ops::Range, path::Path};
 
-use crate::ui::{Side, TextBuffer, TextLayout};
+use crate::{book::parse::TEMPERATURENHETER, ui::{Side, TextBuffer, TextLayout}};
 
 mod parse;
 
-#[derive(Default)]
+pub use parse::ParseError;
+
+#[derive(Debug, Default, PartialEq)]
 pub struct Recept {
     namn: String,
     källa: Option<String>,
@@ -16,14 +18,14 @@ pub struct Recept {
 }
 
 impl Recept {
-    pub fn try_parse_file(path: &Path) -> Result<Option<Self>, crate::Error> {
+    pub fn try_parse_file(path: &Path) -> Result<Result<Self, ParseError>, crate::Error> {
         use std::io::Read;
         let mut buf = String::new();
         std::fs::File::open(path)?.read_to_string(&mut buf)?;
         Ok(Self::try_parse(buf))
     }
 
-    pub fn try_parse<S: Into<String>>(source: S) -> Option<Self> {
+    pub fn try_parse<S: Into<String>>(source: S) -> Result<Self, ParseError> {
         parse::recipe(source)
     }
 
@@ -55,12 +57,24 @@ impl Recept {
         &self.steg
     }
     
-    pub fn render(&self, rect: crate::ui::Rect, buf: &mut impl TextBuffer) -> std::io::Result<()> {
+    pub fn render(&self, rect: crate::ui::Rect, buf: &mut impl TextBuffer, storlek: &Option<Storhet>) -> std::io::Result<()> {
+        let fac = if let Some(ny_storlek) = storlek && let Some(old_storlek) = self.storlek() {
+            ny_storlek.värde.average() / old_storlek.värde.average()
+        } else {
+            1.0
+        };
+
         let mut rect = rect;
 
+        let storlek_string = if let Some(storlek) = storlek.as_ref() {
+            Some(format!("{storlek} !*"))
+        } else if let Some(storlek) = self.storlek() {
+            Some(format!("{storlek}"))
+        } else {
+            None
+        };
         let extra_info = [
-            self.storlek().map(|storlek| storlek.to_string()),
-            self.ugnstemperatur().map(|temp| format!("Ugnstemperatur {temp}")),
+            storlek_string,
             self.tillagningstid().map(|tid| format!("Tillagningstid {tid}"))
         ].into_iter().flatten().collect::<Vec<String>>().join(". ");
 
@@ -76,9 +90,13 @@ impl Recept {
         }
         rubrikavsnitt.with_space(1).render_cut(&mut rect, buf)?;
 
+        let mut ingredients = self.ingredienser.clone();
+        for ip in &mut ingredients {
+            ip.scale(fac);
+        }
         let ingredients = TextLayout::new()
             .indent_body()
-            .with_items(self.ingredienser(), 0)
+            .with_items(&ingredients, 0)
             .with_space(2);
 
         if rect.w > 50 {
@@ -119,29 +137,97 @@ impl Recept {
         // Alla delar av söksträngen matchade åtminstone en ingrediens.
         true
     }
+    
+    pub fn spara<P: AsRef<Path>>(&self, path: P) -> Result<(), crate::Error> {
+        Ok(std::fs::write(path, self.to_string())?)
+    }
+}
+
+impl Display for Recept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{}", self.rubrik())?;
+        if let Some(källa) = self.källa() {
+            writeln!(f, "({})", källa)?;
+        }
+        if let Some(ugntemp) = self.ugnstemperatur() {
+            writeln!(f, "Ugnstemperatur: {ugntemp}")?;
+        }
+        if let Some(tid) = self.tillagningstid() {
+            writeln!(f, "Tillagningstid: {tid}")?;
+        }
+        if let Some(storlek) = self.storlek() {
+            writeln!(f, "{storlek}")?;
+        }
+        writeln!(f)?;
+        writeln!(f, "Ingredienser:")?;
+        for ingrediens in self.ingredienser() {
+            match ingrediens {
+                IngrediensPost::Ingrediens(storhet, namn) => if let Some(storhet) = storhet {
+                    writeln!(f, "{storhet} {namn}")?
+                } else {
+                    writeln!(f, "{namn}")?
+                }
+                IngrediensPost::Underrubrik(text) => writeln!(f, "/{text}")?,
+            }
+            
+        }
+        writeln!(f)?;
+        writeln!(f, "Gör så här:")?;
+        for steg in self.steg() {
+            writeln!(f, "{steg}")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Clone)]
 pub struct Storhet {
-    värde: Värde,
+    pub värde: Värde,
     enhet: String,
     cirka: bool,
 }
 
 impl Display for Storhet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(format!("{} {} {}",
-            self.cirka.then(|| "ca").unwrap_or_default(),
-            self.värde,
-            self.enhet
-        ).trim())
+        if TEMPERATURENHETER.contains(&self.enhet.as_str()) {
+            f.write_str(format!("{} {}{}",
+                self.cirka.then(|| "ca").unwrap_or_default(),
+                self.värde,
+                self.enhet).trim())
+        } else {
+            f.write_str(format!("{} {} {}",
+                self.cirka.then(|| "ca").unwrap_or_default(),
+                self.värde,
+                self.enhet).trim())
+        }
     }
 }
 
 #[derive(Debug, Clone)]
-enum Värde {
+pub enum Värde {
     Skalär(f32),
     Intervall(Range<f32>),
+}
+impl Värde {
+    fn average(&self) -> f32 {
+        match self {
+            Värde::Skalär(v) => *v,
+            Värde::Intervall(range) => (range.start + range.end) * 0.5,
+        }
+    }
+
+    pub fn try_parse(s: &str) -> Option<Self> {
+        Some(parse::parse_storhet(s)?.0.värde)
+    }
+
+    fn scale(&mut self, scale: &f32) {
+        match self {
+            Värde::Skalär(v) => *v *= scale,
+            Värde::Intervall(range) => {
+                range.start * range.start * scale..range.end * scale;
+            }
+        }
+    }
 }
 
 impl Display for Värde {
@@ -254,10 +340,14 @@ impl Storhet {
     pub fn med_enhet<T: Into<String>>(self, enhet: T) -> Self {
         Self { enhet: enhet.into(), ..self }
     }
+
+    fn skala(&mut self, skala: f32) {
+        self.värde.scale(&skala);
+    }
 }
 
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum IngrediensPost {
     Ingrediens(Option<Storhet>, String),
     Underrubrik(String),
@@ -267,6 +357,13 @@ impl IngrediensPost {
         match self {
             IngrediensPost::Ingrediens(_, namn) => namn,
             IngrediensPost::Underrubrik(namn) => namn,
+        }
+    }
+    
+    fn scale(&mut self, fac: f32) {
+        match self {
+            IngrediensPost::Ingrediens(Some(storhet), _) => storhet.skala(fac),
+            _ => (),
         }
     }
 }
@@ -351,6 +448,7 @@ mod test {
             "Lägg den heta nykokta spaghettin i en varm djup tallrik, strö över köttet. Lägg äggulan i en fördjupning i mitten.",
             "Mal över rikligt med peppar, strö över riven ost och blanda alltsammans på tallriken.",
         ]);
+        assert_eq!(Recept::try_parse(recept.to_string()).unwrap(), recept);
     }
 
     #[test]
@@ -428,5 +526,6 @@ mod test {
             "Ta ut kladdkakan och låt svalna.",
             "Sikta florsocker över om så önskas.",
         ]);
+        assert_eq!(Recept::try_parse(recept.to_string()).unwrap(), recept);
     }
 }
