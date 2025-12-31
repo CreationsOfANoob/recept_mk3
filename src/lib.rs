@@ -439,6 +439,58 @@ impl TextEditor {
         self.line_i = y;
     }
 
+    fn delete_num(&mut self, n: usize) {
+        let mut remaining = n;
+        while remaining > 0 {
+            if self.grapheme_i == 0 {
+                if self.line_i == 0 {
+                    return;
+                }
+                self.lines.remove(self.line_i);
+                remaining -= 1;
+            } else {
+                let graphemes = self.lines[self.line_i].graphemes(true).collect::<Vec<&str>>();
+                let take = remaining.min(graphemes.len());
+                remaining -= take;
+                self.lines[self.line_i] = graphemes[0..graphemes.len() - take].join("");
+            }
+        }
+    }
+
+    fn seek_until_different(&self, forward: bool) -> usize {
+        let Some(line) = self.lines.get(self.line_i) else {
+            return 0;
+        };
+        let increment = forward as isize * 2 + 1; // false -1, true 1
+        let mut len = 1;
+        
+        let graphemes = line.graphemes(true).collect::<Vec<&str>>();
+        let mut i = self.grapheme_i;
+
+        let mut delete_ty = None;
+
+        loop {
+            i = i.saturating_add_signed(increment);
+            if (forward && i >= graphemes.len().saturating_sub(1)) || (!forward && i == 0) {
+                break;
+            }
+            let chars = graphemes[i - 1].chars();
+            let ty = if chars.clone().all(char::is_whitespace) {
+                CharType::Whitespace
+            } else if chars.clone().all(char::is_alphanumeric) {
+                CharType::AlphaNumeric
+            } else {
+                CharType::Other
+            };
+            if *delete_ty.get_or_insert(ty) != ty {
+                break;
+            }
+            len += 1;
+        }
+        len
+    }
+
+
     /// Returns true if enter was pressed and single line mode is active
     pub fn edit(&mut self, edit_event: TextEditEvent) -> bool {
         // Sanitize indices
