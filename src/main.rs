@@ -197,8 +197,8 @@ impl ReceptApp {
             if let Some(recept) = self.recept.get(recept_path) {
                 recept.render(flik_rect, buf, storlek)?;
             }
-            if let UserMode::JusteraStorlek(editor) = &self.mode {
-                let storlek_rect = flik_rect.cut_mut(Side::Top, 3);
+            if let UserMode::JusteraStorlek(editor) = &self.mode && flik_i == self.flikval {
+                let storlek_rect = flik_rect.cut_mut(Side::Top, 3).moved(0, 2);
                 editor.render("Ny storlek...", storlek_rect.with_inset(1, 1), buf)?;
                 Border::new(storlek_rect, BorderStyle::THIN).render(buf)?;
             }

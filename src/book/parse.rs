@@ -223,14 +223,10 @@ pub(super) fn parse_storhet(s: &str) -> Option<(Storhet, String)> {
 
 fn strip_enhet(remainder: &str) -> Option<(MåttEnhet, &str)> {
     let exact = remainder.split_whitespace().next()?;
-    let mut candidate = None;
     for enhet in MÅTTENHETER {
         if enhet.name == exact {
             // Exact match, return
             return Some((*enhet, remainder.strip_prefix(enhet.name).unwrap().trim()));
-        }
-        if let Some(stripped) = remainder.strip_prefix(enhet.name) {
-            candidate = Some((*enhet, stripped.trim()));
         }
         let Some(plural) = enhet.pluralform else {
             continue;
@@ -239,11 +235,8 @@ fn strip_enhet(remainder: &str) -> Option<(MåttEnhet, &str)> {
             // Exact match, return
             return Some((*enhet, remainder.strip_prefix(plural).unwrap().trim()));
         }
-        if let Some(stripped) = remainder.strip_prefix(plural) {
-            candidate = Some((*enhet, stripped.trim()));
-        }
     }
-    candidate
+    None
 }
 
 /// Parse a string containing only a number
@@ -376,6 +369,7 @@ mod tests {
     #[test]
     fn parse_storheter() {
         assert_eq!(parse_storhet("1 dl"), Some((Storhet::värde(1.0).med_enhet("dl"), "".to_string())));
+        assert_eq!(parse_storhet("1 gul lök"), Some((Storhet::värde(1.0), "gul lök".to_string())));
         assert_eq!(parse_storhet("2dl"), Some((Storhet::värde(2.0).med_enhet("dl"), "".to_string())));
         assert_eq!(parse_storhet("200°C"), Some((Storhet::värde(200.0).med_enhet("°C"), "".to_string())));
         assert_eq!(parse_storhet("2 1/2 dl"), Some((Storhet::värde(2.5).med_enhet("dl"), "".to_string())));
