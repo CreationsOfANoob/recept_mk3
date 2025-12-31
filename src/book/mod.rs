@@ -1,10 +1,10 @@
-use std::{fmt::Display, ops::Range, path::Path};
+use core::f32;
+use std::{fmt::Display, ops::{Add, Mul, Range}, path::Path};
 
-use crate::{book::parse::TEMPERATURENHETER, ui::{Side, TextBuffer, TextLayout}};
-
+use crate::{book::parse::{MåttEnhet, TEMPERATURENHETER}, ui::{Side, TextBuffer, TextLayout}};
 mod parse;
-
 pub use parse::ParseError;
+use crate::book::parse::MÅTTENHETER;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Recept {
@@ -66,7 +66,7 @@ impl Recept {
 
         let mut rect = rect;
 
-        let storlek_string = if let Some(storlek) = storlek.as_ref() {
+        let storlek_string = if let Some(storlek) = storlek.as_ref() && let Some(old_storlek) = self.storlek() && storlek != old_storlek {
             Some(format!("{storlek} !*"))
         } else if let Some(storlek) = self.storlek() {
             Some(format!("{storlek}"))
@@ -92,7 +92,7 @@ impl Recept {
 
         let mut ingredients = self.ingredienser.clone();
         for ip in &mut ingredients {
-            ip.scale(fac);
+            ip.scale(fac, true);
         }
         let ingredients = TextLayout::new()
             .indent_body()
@@ -183,7 +183,7 @@ impl Display for Recept {
 #[derive(Debug, Default, PartialEq, Clone)]
 pub struct Storhet {
     pub värde: Värde,
-    enhet: String,
+    enhet: MåttEnhet,
     cirka: bool,
 }
 
@@ -193,12 +193,17 @@ impl Display for Storhet {
             f.write_str(format!("{} {}{}",
                 self.cirka.then(|| "ca").unwrap_or_default(),
                 self.värde,
-                self.enhet).trim())
+                self.enhet.as_str()).trim())
         } else {
+            let pluralsträng = if self.värde.is_plural() {
+                self.enhet.pluralform.unwrap_or(self.enhet.as_str())
+            } else {
+                self.enhet.as_str()
+            };
             f.write_str(format!("{} {} {}",
                 self.cirka.then(|| "ca").unwrap_or_default(),
                 self.värde,
-                self.enhet).trim())
+                pluralsträng).trim())
         }
     }
 }
@@ -226,6 +231,13 @@ impl Värde {
             Värde::Intervall(range) => {
                 range.start * range.start * scale..range.end * scale;
             }
+        }
+    }
+    
+    fn is_plural(&self) -> bool {
+        match self {
+            Värde::Skalär(v) => v.abs() >= 2.0,
+            Värde::Intervall(range) => range.start.abs() >= 2.0 || range.end.abs() >= 2.0,
         }
     }
 }
@@ -257,19 +269,19 @@ fn format_number(v: f32) -> String {
         .or_else(|| replace_fraction(dec, 2, 3))
         .or_else(|| replace_fraction(dec, 1, 4))
         .or_else(|| replace_fraction(dec, 3, 4))
-        .or_else(|| replace_fraction(dec, 1, 5))
-        .or_else(|| replace_fraction(dec, 2, 5))
-        .or_else(|| replace_fraction(dec, 3, 5))
-        .or_else(|| replace_fraction(dec, 4, 5))
-        .or_else(|| replace_fraction(dec, 1, 6))
-        .or_else(|| replace_fraction(dec, 5, 6))
-        .or_else(|| replace_fraction(dec, 1, 7))
-        .or_else(|| replace_fraction(dec, 1, 8))
-        .or_else(|| replace_fraction(dec, 3, 8))
-        .or_else(|| replace_fraction(dec, 5, 8))
-        .or_else(|| replace_fraction(dec, 7, 8))
-        .or_else(|| replace_fraction(dec, 1, 9))
-        .or_else(|| replace_fraction(dec, 1, 10)) 
+        // .or_else(|| replace_fraction(dec, 1, 5))
+        // .or_else(|| replace_fraction(dec, 2, 5))
+        // .or_else(|| replace_fraction(dec, 3, 5))
+        // .or_else(|| replace_fraction(dec, 4, 5))
+        // .or_else(|| replace_fraction(dec, 1, 6))
+        // .or_else(|| replace_fraction(dec, 5, 6))
+        // .or_else(|| replace_fraction(dec, 1, 7))
+        // .or_else(|| replace_fraction(dec, 1, 8))
+        // .or_else(|| replace_fraction(dec, 3, 8))
+        // .or_else(|| replace_fraction(dec, 5, 8))
+        // .or_else(|| replace_fraction(dec, 7, 8))
+        // .or_else(|| replace_fraction(dec, 1, 9))
+        // .or_else(|| replace_fraction(dec, 1, 10)) 
     {
         let int = (v.abs().floor() * v.signum()) as i32;
         if int != 0 {
@@ -278,7 +290,7 @@ fn format_number(v: f32) -> String {
             frac
         }
     } else {
-        let decimals = format!("{v:.4}");
+        let decimals = format!("{v:.1}");
         let no_trailing_zeros = decimals.trim_end_matches("0");
         let clean = if let Some(no_trailing_dot) = 
         no_trailing_zeros.strip_suffix(".") {
@@ -303,6 +315,28 @@ impl PartialEq for Värde {
 impl Default for Värde {
     fn default() -> Self {
         Self::Skalär(0.0)
+    }
+}
+
+impl Mul<f32> for Värde {
+    type Output = Self;
+
+    fn mul(self, rhs: f32) -> Self {
+        match self {
+            Värde::Skalär(v) => Värde::Skalär(v * rhs),
+            Värde::Intervall(range) => Värde::Intervall(range.start * rhs..range.end * rhs)
+        }
+    }
+}
+
+impl Add<f32> for Värde {
+    type Output = Self;
+
+    fn add(self, rhs: f32) -> Self {
+        match self {
+            Värde::Skalär(v) => Värde::Skalär(v + rhs),
+            Värde::Intervall(range) => Värde::Intervall(range.start + rhs..range.end + rhs),
+        }
     }
 }
 
@@ -337,12 +371,60 @@ impl Storhet {
         }
     }
 
-    pub fn med_enhet<T: Into<String>>(self, enhet: T) -> Self {
-        Self { enhet: enhet.into(), ..self }
+    pub fn med_enhet(self, enhet: &str) -> Self {
+        let mut hittad_enhet = None;
+        for måttenhet in MÅTTENHETER {
+            if enhet == måttenhet.as_str() {
+                hittad_enhet = Some(måttenhet);
+                break;
+            } else if let Some(plural) = måttenhet.pluralform && plural == enhet {
+                hittad_enhet = Some(måttenhet);
+                break;
+            }
+        }
+        Self { enhet: *hittad_enhet.unwrap_or(&MåttEnhet::ENHETSLÖS), ..self }
     }
 
-    fn skala(&mut self, skala: f32) {
-        self.värde.scale(&skala);
+    #[must_use]
+    fn skala(&self, skala: f32, optimal: bool) -> Self {
+        let mut new = self.clone();
+        new.värde.scale(&skala);
+        if optimal {
+            new.find_optimal_unit();
+        }
+        new
+    }
+
+    fn convert(self, enhet: MåttEnhet) -> Option<Self> {
+        if enhet.dimension != self.enhet.dimension {
+            return None;
+        }
+        let to_base = self.värde.add(self.enhet.noll).mul(self.enhet.faktor);
+        let to_new = to_base.mul(1.0 / enhet.faktor).add(-enhet.noll);
+        Some(Self { värde: to_new, enhet, ..self })
+    }
+    
+    fn find_optimal_unit(&mut self) {
+        let mut best_cand = self.clone();
+        let mut best_cand_d = self.värde.average().log10();
+        if best_cand_d < 0.0 {
+            best_cand_d = f32::MAX;
+        }
+        for cand in MÅTTENHETER {
+            if cand.dimension != self.enhet.dimension {
+                continue;
+            }
+            let Some(converted) = self.clone().convert(*cand) else {
+                continue;
+            };
+            let cand_d = converted.värde.average().log10();
+            println!("source: {self}, cand: {cand:?}, converted: {converted}, best_fit: {best_cand_d}, this: {cand_d}");
+            if cand_d < best_cand_d && cand_d >= 0.0 {
+                best_cand_d = cand_d;
+                best_cand = converted;
+            }
+        }
+        *self = best_cand;
     }
 }
 
@@ -352,6 +434,7 @@ pub enum IngrediensPost {
     Ingrediens(Option<Storhet>, String),
     Underrubrik(String),
 }
+
 impl IngrediensPost {
     fn namn(&self) -> &str {
         match self {
@@ -360,10 +443,9 @@ impl IngrediensPost {
         }
     }
     
-    fn scale(&mut self, fac: f32) {
-        match self {
-            IngrediensPost::Ingrediens(Some(storhet), _) => storhet.skala(fac),
-            _ => (),
+    fn scale(&mut self, fac: f32, convert_unit: bool) {
+        if let IngrediensPost::Ingrediens(Some(storhet), _) = self {
+            *storhet = storhet.skala(fac, convert_unit);
         }
     }
 }
@@ -395,6 +477,18 @@ mod test {
         Some(format!("{tolkat}"))
     }
 
+    fn storhet(s: &str) -> Storhet {
+        parse_storhet(s).unwrap().0
+    }
+
+    #[test]
+    fn skala_storhet() {
+        assert_eq!(storhet("10 dl").skala(10.0, true), storhet("10 l"));
+        assert_eq!(storhet("15 dl").skala(0.001, true), storhet("1,5 ml"));
+        assert_eq!(storhet("15 dl").skala(0.01, true), storhet("1 msk"));
+        assert_eq!(storhet("1 kg").skala(0.5, true), storhet("500 g"));
+    }
+
     #[test]
     fn format_värde() {
         for a in [
@@ -403,7 +497,7 @@ mod test {
             "1 1/2",
             "10 1/3",
             "9 2/3",
-            "-2 1/7",
+            "-2,1",
         ] {
             assert_eq!(two_way_convert(a), Some(a.to_string()));
         }

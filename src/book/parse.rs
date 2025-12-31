@@ -4,25 +4,113 @@ use crate::book::{Recept, Storhet, Värde, ingrediens, ingrediensrubrik};
 
 const UNDERRUBRIK: &str = "/";
 const INGREDIENSMARKÖR: &str = "ingrediens";
-const MÅTTENHETER: &[&str] = &[
-    "sats",
-    "burkar",
-    "bit",
-    "bitar",
-    "dl",
-    "msk",
-    "st",
-    "l",
-    "g",
-    "kg",
-    "tsk",
-    "krm",
-    "portion",
-    "portioner",
-    "°C",
-    "°F",
-    "°",
+
+pub const MÅTTENHETER: &[MåttEnhet] = &[
+    MåttEnhet::enhetslös("sats", 1.0),
+    MåttEnhet::enhetslös("burk", 1.0).plural("burkar"),
+    MåttEnhet::enhetslös("bit", 1.0).plural("bitar"),
+    MåttEnhet::enhetslös("st", 1.0),
+    MåttEnhet::enhetslös("portion", 1.0).plural("portioner"),
+    MåttEnhet::enhetslös("näve", 1.0).plural("nävar"),
+    MåttEnhet::enhetslös("nypa", 1.0).plural("nypor"),
+    MåttEnhet::volym("l", 1.0),
+    MåttEnhet::volym("dl",  0.1),
+    MåttEnhet::volym("ml", 0.001),
+    MåttEnhet::volym("msk", 0.015),
+    MåttEnhet::längd("tsk", 0.005),
+    MåttEnhet::längd("krm", 0.001),
+    MåttEnhet::vikt("g", 0.001),
+    MåttEnhet::vikt("ton", 1000.0),
+    MåttEnhet::vikt("kg", 1.0),
+    MåttEnhet::tid("sekund", 1.0).plural("sekunder"),
+    MåttEnhet::tid("minut", 60.0).plural("minuter"),
+    MåttEnhet::tid("timme", 3600.0).plural("timmar"),
+    MåttEnhet::temperatur("°K", 1.0, 0.0),
+    MåttEnhet::temperatur("°C", 1.0, 273.15),
+    MåttEnhet::temperatur("°F", 5.0 / 9.0, 459.67),
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MåttEnhet {
+    name: &'static str,
+    pub pluralform: Option<&'static str>,
+    pub dimension: Dimension,
+    pub faktor: f32,
+    pub noll: f32,
+}
+
+impl Default for MåttEnhet {
+    fn default() -> Self {
+        Self { name: Default::default(), dimension: Default::default(), faktor: 1.0, noll: Default::default(), pluralform: None }
+    }
+}
+
+impl MåttEnhet {
+    pub(crate) const ENHETSLÖS: Self = Self::enhetslös("", 1.0);
+
+    const fn enhetslös(name: &'static str, faktor: f32) -> Self {
+        Self { name, dimension: Dimension::ENHETSLÖS, faktor, noll: 0.0, pluralform: None }
+    }
+
+    const fn längd(name: &'static str, faktor: f32) -> Self {
+        Self { name, dimension: Dimension::LÄNGD, faktor, noll: 0.0, pluralform: None }
+    }
+
+    const fn volym(name: &'static str, faktor: f32) -> Self {
+        Self { name, dimension: Dimension::LÄNGD.pow(3), faktor, noll: 0.0, pluralform: None }
+    }
+
+    const fn vikt(name: &'static str, faktor: f32) -> Self {
+        Self { name, dimension: Dimension::MASSA, faktor, noll: 0.0, pluralform: None }
+    }
+
+    const fn tid(name: &'static str, faktor: f32) -> Self {
+        Self { name, dimension: Dimension::TID, faktor, noll: 0.0, pluralform: None }
+    }
+
+    const fn temperatur(name: &'static str, faktor: f32, noll: f32) -> Self {
+        Self { name, dimension: Dimension::TEMPERATUR, faktor, noll, pluralform: None }
+    }
+
+    const fn plural(self, plural: &'static str) -> Self {
+        Self { pluralform: Some(plural), ..self }
+    }
+
+    pub const fn as_str(&self) -> &str {
+        self.name
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Dimension {
+    längd: i8,
+    massa: i8,
+    tid: i8,
+    temperatur: i8,
+}
+
+impl Dimension {
+    const ENHETSLÖS: Self = Self {
+        längd: 0,
+        massa: 0,
+        tid: 0,
+        temperatur: 0,
+    };
+    const LÄNGD: Self = Self { längd: 1, ..Self::ENHETSLÖS };
+    const MASSA: Self = Self { massa: 1, ..Self::ENHETSLÖS };
+    const TID: Self = Self { tid: 1, ..Self::ENHETSLÖS };
+    const TEMPERATUR: Self = Self { temperatur: 1, ..Self::ENHETSLÖS };
+
+    const fn pow(self, exp: i8) -> Self {
+        Self {
+            längd: self.längd * exp,
+            massa: self.massa * exp,
+            tid: self.tid * exp,
+            temperatur: self.temperatur * exp,
+        }
+    }
+}
+
 pub(crate) const TEMPERATURENHETER: &[&str] = &[
     "°C",
     "°F",
@@ -126,22 +214,32 @@ pub(super) fn parse_storhet(s: &str) -> Option<(Storhet, String)> {
     };
 
     if let Some((enhet, remainder)) = strip_enhet(&remainder) {
-        parsed.enhet = enhet.to_string();
+        parsed.enhet = enhet;
         Some((parsed, remainder.to_string()))
     } else {
         Some((parsed, remainder))
     }
 }
 
-fn strip_enhet(remainder: &str) -> Option<(&str, &str)> {
+fn strip_enhet(remainder: &str) -> Option<(MåttEnhet, &str)> {
     let exact = remainder.split_whitespace().next()?;
     let mut candidate = None;
     for enhet in MÅTTENHETER {
-        if *enhet == exact {
+        if enhet.name == exact {
             // Exact match, return
-            return Some((enhet, remainder.strip_prefix(enhet).unwrap().trim()));
+            return Some((*enhet, remainder.strip_prefix(enhet.name).unwrap().trim()));
         }
-        if let Some(stripped) = remainder.strip_prefix(enhet) {
+        if let Some(stripped) = remainder.strip_prefix(enhet.name) {
+            candidate = Some((*enhet, stripped.trim()));
+        }
+        let Some(plural) = enhet.pluralform else {
+            continue;
+        };
+        if plural == exact {
+            // Exact match, return
+            return Some((*enhet, remainder.strip_prefix(plural).unwrap().trim()));
+        }
+        if let Some(stripped) = remainder.strip_prefix(plural) {
             candidate = Some((*enhet, stripped.trim()));
         }
     }
@@ -260,7 +358,7 @@ fn parse_as_temperature(line: &str) -> Option<Storhet> {
     let mut parts = part.split("°");
     let storhet = parse_storhet(parts.next()?)?.0;
     let unit = parts.next().unwrap_or("C");
-    Some(storhet.med_enhet(format!("°{unit}")))
+    Some(storhet.med_enhet(&format!("°{unit}")))
 }
 
 fn ingredients_start(line: &str) -> bool {
