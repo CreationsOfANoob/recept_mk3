@@ -7,3 +7,4 @@
 - Ingredienser
 - Portionsomräkning
 - Sidbrytning på recept
+- Skapa nya recept

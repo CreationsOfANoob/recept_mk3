@@ -81,16 +81,7 @@ const TITEL: &str =
 
 ;
 
-const DEFAULT_RECEPT: &str = "Exempelrubrik
-
-Ingredienser:
-1 dl lorem
-100 g ipsum
-
-Gör så här:
-Dolor sit amet.
-Consectetur adipiscing elit. 
-Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.";
+const DEFAULT_RECEPT: &str = "Skriv eller klistra in ett recept...";
 
 enum Command {
     ListaNed,
@@ -284,7 +275,7 @@ impl App<Command> for ReceptApp {
                 .hidden(KeyCode::Right, Command::FlikNästa)
                 .hidden(KeyCode::Left, Command::FlikFörra),
             UserMode::SkapaRecept(_) => CommandList::new()
-                .command(KeyCode::Enter, Command::SkapaRecept),
+                .ctrl_with_name_override(KeyCode::Char('x'), Command::SkapaRecept, "spara som TODOOOOO".to_string()),
             UserMode::Sök(_) => CommandList::new(),
         }
     }
@@ -361,6 +352,9 @@ impl App<Command> for ReceptApp {
                 }
                 self.sökfilter = editor.to_string();
             },
+            UserMode::SkapaRecept(editor) => {
+                editor.edit(edit_event);
+            }
             _ => ()
         }
         self.filtrera_recept();
@@ -370,7 +364,7 @@ impl App<Command> for ReceptApp {
     }
     
     fn is_editing_text(&self) -> bool {
-        matches!(self.mode, UserMode::Sök(_))
+        matches!(self.mode, UserMode::Sök(_) | UserMode::SkapaRecept(_))
     }
 }
 

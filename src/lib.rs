@@ -190,11 +190,28 @@ pub struct CommandSignature<C: Display> {
     hidden: bool,
     ctrl: bool,
     command: C,
+    name_override: Option<String>,
+}
+
+impl<C: Display> Display for CommandSignature<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.ctrl {
+            f.write_str("^")?;
+        }
+        f.write_str(&format_key(self.key))?;
+        f.write_str(": ")?;
+        if let Some(alt) = &self.name_override {
+            f.write_str(alt)?;
+        } else {
+            write!(f, "{}", self.command)?;
+        }
+        Ok(())
+    }
 }
 
 impl<C: Display> CommandSignature<C> {
     pub fn new(key: KeyCode, command: C) -> Self {
-        Self { key, hidden: false, command, ctrl: false }
+        Self { key, hidden: false, command, ctrl: false, name_override: None }
     }
 
     pub fn hidden(self) -> Self {
@@ -203,6 +220,10 @@ impl<C: Display> CommandSignature<C> {
 
     pub fn ctrl(self) -> Self {
         Self { ctrl: true, ..self }
+    }
+    
+    fn with_override(self, name: String) -> Self {
+        Self { name_override: Some(name), ..self }
     }
 }
 
@@ -248,6 +269,10 @@ impl<C: Display> CommandList<C> {
         self.with_public(Some(CommandSignature::new(key, command).ctrl()))
     }
 
+    pub fn ctrl_with_name_override(self, key: KeyCode, command: C, name: String) -> Self {
+        self.with_public(Some(CommandSignature::new(key, command).ctrl().with_override(name)))
+    }
+
     pub fn empty_slot(self) -> Self {
         self.with_public(None)
     }
@@ -266,6 +291,7 @@ pub enum TextEditEvent {
     Backspace,
     Enter,
     Delete,
+    DeleteWord,
 }
 
 pub trait App<C: Display> {
@@ -311,9 +337,7 @@ fn main_loop<C: Display, A: App<C>>(mut app: A) -> std::io::Result<()> {
                 if command.hidden {
                     continue;
                 }
-                let key = command.key;
-
-                TextLayout::new().with_text(format!("{}{}: {}", command.ctrl.then(||"^").unwrap_or_default(), format_key(key), command.command), 0).render(slot, &mut buf)?;
+                TextLayout::new().with_text(command.to_string(), 0).render(slot, &mut buf)?;
             }
             buf.flush()?;
 
@@ -525,6 +549,35 @@ impl TextEditor {
                     self.lines[self.line_i] = graphemes.join("");
                 }
             },
+            TextEditEvent::DeleteWord => if let Some(line) = self.lines.get(self.line_i).cloned() {
+                if self.grapheme_i > 0 {
+                    let mut graphemes = line.graphemes(true).collect::<Vec<&str>>();
+                    self.grapheme_i -= 1;
+                    graphemes.remove(self.grapheme_i);
+                    let mut delete_ty = None;
+                    while self.grapheme_i > 0 {
+                        
+                        let chars = graphemes[self.grapheme_i - 1].chars();
+                        let ty = if chars.clone().all(char::is_whitespace) {
+                            CharType::Whitespace
+                        } else if chars.clone().all(char::is_alphanumeric) {
+                            CharType::AlphaNumeric
+                        } else {
+                            CharType::Other
+                        };
+                        if *delete_ty.get_or_insert(ty) != ty {
+                            break;
+                        }
+                        self.grapheme_i -= 1;
+                        graphemes.remove(self.grapheme_i);
+                    }
+                    self.lines[self.line_i] = graphemes.join("");
+                } else if self.line_i > 0 {
+                    self.lines[self.line_i - 1].push_str(&line);
+                    self.lines.remove(self.line_i);
+                    self.line_i -= 1;
+                }
+            },
         }
         false
     }
@@ -539,6 +592,13 @@ impl TextEditor {
     pub fn single_line_mode(self) -> TextEditor {
         Self { single_line_mode: true, ..self }
     }
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum CharType {
+    Whitespace,
+    AlphaNumeric,
+    Other,
 }
 
 impl Display for TextEditor {
@@ -754,6 +814,45 @@ mod test_text_edit {
         assert_eq!(a.to_string(), [
             "illar inte detta testfall.",
             "Kommer nog inte själv att behöva detta."
+        ].join("\n"));
+    }
+
+    #[test]
+    fn delete_word() {
+        let mut a = TextEditor::from_string([
+            "Det här däremot är användbart.   ",
+            "",
+            "Kommer nog själv att behöva detta."
+        ].join("\n"));
+        a.edit(TextEditEvent::DeleteWord);
+        assert_eq!(a.to_string(), [
+            "Det här däremot är användbart.   ",
+            "",
+            "Kommer nog själv att behöva detta."
+        ].join("\n"));
+        for _ in 0..3 {
+            a.edit(TextEditEvent::Right);
+        }
+        a.edit(TextEditEvent::DeleteWord);
+        assert_eq!(a.to_string(), [
+            " här däremot är användbart.   ",
+            "",
+            "Kommer nog själv att behöva detta."
+        ].join("\n"));
+        for _ in 0..30 {
+            a.edit(TextEditEvent::Right);
+        }
+        a.edit(TextEditEvent::DeleteWord);
+        assert_eq!(a.to_string(), [
+            " här däremot är användbart.",
+            "",
+            "Kommer nog själv att behöva detta."
+        ].join("\n"));
+        a.edit(TextEditEvent::DeleteWord);
+        assert_eq!(a.to_string(), [
+            " här däremot är ",
+            "",
+            "Kommer nog själv att behöva detta."
         ].join("\n"));
     }
 }
