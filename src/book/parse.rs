@@ -6,7 +6,6 @@ const UNDERRUBRIK: &str = "/";
 const INGREDIENSMARKÖR: &str = "ingrediens";
 
 pub const MÅTTENHETER: &[MåttEnhet] = &[
-    MåttEnhet::enhetslös("sats", 1.0),
     MåttEnhet::enhetslös("burk", 1.0).plural("burkar"),
     MåttEnhet::enhetslös("bit", 1.0).plural("bitar"),
     MåttEnhet::enhetslös("st", 1.0),

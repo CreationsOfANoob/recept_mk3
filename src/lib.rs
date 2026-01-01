@@ -522,7 +522,6 @@ impl TextEditor {
         } else {
             pre
         }.to_vec();
-        println!("{graphemes:?}");
         graphemes.pop();
         graphemes.reverse();
         let mut num = 1;

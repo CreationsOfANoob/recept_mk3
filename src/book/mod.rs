@@ -418,7 +418,6 @@ impl Storhet {
                 continue;
             };
             let cand_d = converted.värde.average().log10();
-            println!("source: {self}, cand: {cand:?}, converted: {converted}, best_fit: {best_cand_d}, this: {cand_d}");
             if cand_d < best_cand_d && cand_d >= 0.0 {
                 best_cand_d = cand_d;
                 best_cand = converted;
