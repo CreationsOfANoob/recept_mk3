@@ -1,10 +1,10 @@
 use core::f32;
 use std::{fmt::Display, ops::{Add, Mul, Range}, path::Path};
 
-use crate::{book::parse::{MåttEnhet, TEMPERATURENHETER}, ui::{Side, TextBuffer, TextLayout}};
+use crate::{bok::parse::{MåttEnhet, TEMPERATURENHETER}, ui::{Side, TextLayout, Drawer}};
 mod parse;
 pub use parse::ParseError;
-use crate::book::parse::MÅTTENHETER;
+use crate::bok::parse::MÅTTENHETER;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Recept {
@@ -57,7 +57,7 @@ impl Recept {
         &self.steg
     }
     
-    pub fn render(&self, rect: crate::ui::Rect, buf: &mut impl TextBuffer, storlek: &Option<Storhet>) -> std::io::Result<()> {
+    pub fn render(&self, rect: crate::ui::Rect, buf: &mut Drawer, storlek: &Option<Storhet>) {
         let fac = if let Some(ny_storlek) = storlek && let Some(old_storlek) = self.storlek() {
             ny_storlek.värde.average() / old_storlek.värde.average()
         } else {
@@ -88,7 +88,7 @@ impl Recept {
                 .with_single_line(&extra_info)
                 .with_divider();
         }
-        rubrikavsnitt.with_space(1).render_cut(&mut rect, buf)?;
+        rubrikavsnitt.with_space(1).render_cut(&mut rect, buf);
 
         let mut ingredients = self.ingredienser.clone();
         for ip in &mut ingredients {
@@ -104,16 +104,15 @@ impl Recept {
             ingredients_rect.cut_mut(Side::Right, 2);
             let steps = TextLayout::new()
                 .with_items(self.steg(), 1);
-            ingredients.render(ingredients_rect, buf)?;
-            steps.render(steps_rect, buf)?;
+            ingredients.render(ingredients_rect, buf);
+            steps.render(steps_rect, buf);
         } else {
             let steps = TextLayout::new()
                 .indent_first_line()
                 .with_items(self.steg(), 0);
-            ingredients.render_cut(&mut rect, buf)?;
-            steps.render(rect, buf)?;
+            ingredients.render_cut(&mut rect, buf);
+            steps.render(rect, buf);
         }
-        Ok(())
     }
     
     pub fn matches(&self, filter: &str) -> bool {
@@ -240,6 +239,13 @@ impl Värde {
             Värde::Intervall(range) => range.start.abs() >= 2.0 || range.end.abs() >= 2.0,
         }
     }
+    
+    pub fn saturating_sub(&self, rhs: f32) -> Värde {
+        match self {
+            Värde::Skalär(v) => Värde::Skalär((v - rhs).max(0.0)),
+            Värde::Intervall(range) => Värde::Intervall((range.start - rhs).max(0.0)..(range.end - rhs).max(0.0)),
+        }
+    }
 }
 
 impl Display for Värde {
@@ -269,19 +275,6 @@ fn format_number(v: f32) -> String {
         .or_else(|| replace_fraction(dec, 2, 3))
         .or_else(|| replace_fraction(dec, 1, 4))
         .or_else(|| replace_fraction(dec, 3, 4))
-        // .or_else(|| replace_fraction(dec, 1, 5))
-        // .or_else(|| replace_fraction(dec, 2, 5))
-        // .or_else(|| replace_fraction(dec, 3, 5))
-        // .or_else(|| replace_fraction(dec, 4, 5))
-        // .or_else(|| replace_fraction(dec, 1, 6))
-        // .or_else(|| replace_fraction(dec, 5, 6))
-        // .or_else(|| replace_fraction(dec, 1, 7))
-        // .or_else(|| replace_fraction(dec, 1, 8))
-        // .or_else(|| replace_fraction(dec, 3, 8))
-        // .or_else(|| replace_fraction(dec, 5, 8))
-        // .or_else(|| replace_fraction(dec, 7, 8))
-        // .or_else(|| replace_fraction(dec, 1, 9))
-        // .or_else(|| replace_fraction(dec, 1, 10)) 
     {
         let int = (v.abs().floor() * v.signum()) as i32;
         if int != 0 {
@@ -469,7 +462,7 @@ impl Display for IngrediensPost {
 #[cfg(test)]
 mod test {
     use pretty_assertions::assert_eq;
-    use crate::book::{Recept, Storhet, ingrediens, ingrediensrubrik, parse::parse_storhet};
+    use crate::bok::{Recept, Storhet, ingrediens, ingrediensrubrik, parse::parse_storhet};
 
     fn two_way_convert(s: &str) -> Option<String> {
         let tolkat = parse_storhet(s)?.0.värde;
@@ -490,15 +483,31 @@ mod test {
 
     #[test]
     fn format_värde() {
-        for a in [
+        let a = [
             "1",
             "2",
             "1 1/2",
             "10 1/3",
             "9 2/3",
             "-2,1",
-        ] {
-            assert_eq!(two_way_convert(a), Some(a.to_string()));
+            "250–300",
+            "1000-100",
+            "4–5",
+        ];
+        let b = [
+            "1",
+            "2",
+            "1 1/2",
+            "10 1/3",
+            "9 2/3",
+            "-2,1",
+            "250-300",
+            "1000-100",
+            "4-5",
+        ];
+
+        for (a, b) in a.iter().zip(b.iter()) {
+            assert_eq!(two_way_convert(a), Some(b.to_string()));
         }
     }
 

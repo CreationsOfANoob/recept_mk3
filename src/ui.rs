@@ -1,6 +1,5 @@
-use std::{fmt::{Debug, Display}, io::{Write, stdout}, mem::swap};
+use std::{fmt::{Debug, Display}, mem::swap};
 
-use crossterm::{QueueableCommand, cursor, style::{self}, terminal};
 use unicode_segmentation::UnicodeSegmentation;
 
 const SPACE_256: &str = "                                                                                                                                                                                                                                                                ";
@@ -95,23 +94,20 @@ impl Border {
         Self { rect, style }
     }
     
-    pub fn render(&self, buf: &mut impl TextBuffer) -> std::io::Result<()> {
-        
+    pub fn render(&self, buf: &mut Drawer) {
         let Rect { x: start_x, y: start_y, w, h } = self.rect;
-        buf.write_line(start_x, start_y, self.style.top_left)?;
-        buf.write_line(start_x + w - 1, start_y, self.style.top_right)?;
-        buf.write_line(start_x, start_y + h - 1, self.style.bottom_left)?;
-        buf.write_line(start_x + w - 1, start_y + h - 1, self.style.bottom_right)?;
+        buf.write_line(start_x, start_y, self.style.top_left);
+        buf.write_line(start_x + w - 1, start_y, self.style.top_right);
+        buf.write_line(start_x, start_y + h - 1, self.style.bottom_left);
+        buf.write_line(start_x + w - 1, start_y + h - 1, self.style.bottom_right);
 
-        buf.write_line(start_x + 1, start_y, vec![self.style.top; w.saturating_sub(2) as usize].join(""))?;
-        buf.write_line(start_x + 1, start_y + h - 1, vec![self.style.bottom; w.saturating_sub(2) as usize].join(""))?;
+        buf.write_line(start_x + 1, start_y, vec![self.style.top; w.saturating_sub(2) as usize].join(""));
+        buf.write_line(start_x + 1, start_y + h - 1, vec![self.style.bottom; w.saturating_sub(2) as usize].join(""));
 
         for y in start_y + 1..start_y + h - 1 {
-            buf.write_line(start_x, y, self.style.left)?;
-            buf.write_line(start_x + w - 1, y, self.style.right)?;
+            buf.write_line(start_x, y, self.style.left);
+            buf.write_line(start_x + w - 1, y, self.style.right);
         }
-
-        Ok(())
     }
 }
 
@@ -227,29 +223,47 @@ impl Rect {
         self.x += center.then(|| inset).unwrap_or_default();
         self.w = new_w;
     }
+
+    pub fn to_slots(&self, min_w: u16, min_h: u16, margin_x: u16, margin_y: u16, direction: GridDirection) -> Vec<Rect> {
+        let num_x = ((self.w - margin_x) / (min_w + margin_x)).max(1);
+        let num_y = ((self.h - margin_y) / (min_h + margin_y)).max(1);
+
+        self.divide_grid(num_x, num_y, margin_x, margin_y, direction)
+    }
     
-    pub fn to_grid(&self, mut w: u16, mut h: u16, margin: u16, transpose: bool) -> Vec<Rect> {
+    pub fn divide_grid(&self, mut num_x: u16, mut num_y: u16, margin_x: u16, margin_y: u16, direction: GridDirection) -> Vec<Rect> {
         let mut rects = Vec::new();
         
-        let w_margins = self.w.saturating_sub(w.saturating_sub(1) * margin) as f32;
-        let h_margins = self.h.saturating_sub(h.saturating_sub(1) * margin) as f32;
+        let w_margins = self.w.saturating_sub(num_x.saturating_sub(1) * margin_x) as f32;
+        let h_margins = self.h.saturating_sub(num_y.saturating_sub(1) * margin_y) as f32;
 
+        let (transpose, flipx, flipy) = direction.transpose_flipx_flipy();
         if transpose {
-            swap(&mut w, &mut h);
+            swap(&mut num_x, &mut num_y);
         }
 
-        for y in 0..h {
-            for x in 0..w {
-                let mut x = x as f32;
-                let mut y = y as f32;
-                let mut w = w as f32;
-                let mut h = h as f32;
+        for y_i in 0..num_y {
+            let y_i = if flipy {
+                num_y - y_i - 1
+            } else {
+                y_i
+            };
+            for x_i in 0..num_x {
+                let x_i = if flipx {
+                    num_x - x_i - 1
+                } else {
+                    x_i
+                };
+                let mut x = x_i as f32;
+                let mut y = y_i as f32;
+                let mut w = num_x as f32;
+                let mut h = num_y as f32;
                 if transpose {
                     swap(&mut x, &mut y);
                     swap(&mut w, &mut h);
                 }
-                let m_x = x as u16 * margin;
-                let m_y = y as u16 * margin;
+                let m_x = x as u16 * margin_x;
+                let m_y = y as u16 * margin_y;
 
                 let y0 = self.y + ((y / h) * h_margins) as u16 + m_y;
                 let y1 = self.y + (((y + 1.0) / h) * h_margins) as u16 + m_y;
@@ -277,6 +291,32 @@ impl Rect {
         let mut new = self;
         new.inset_mut(w, h);
         new
+    }
+}
+
+pub enum GridDirection {
+    LeftDown,
+    LeftUp,
+    RightDown,
+    RightUp,
+    DownLeft,
+    UpLeft,
+    DownRight,
+    UpRight,
+}
+
+impl GridDirection {
+    fn transpose_flipx_flipy(&self) -> (bool, bool, bool) {
+        match self {
+            GridDirection::LeftDown => (false, false, false),
+            GridDirection::LeftUp => (false, false, true),
+            GridDirection::RightDown => (false, true, false),
+            GridDirection::RightUp => (false, true, true),
+            GridDirection::DownLeft => (true, false, false),
+            GridDirection::UpLeft => (true, false, true),
+            GridDirection::DownRight => (true, true, false),
+            GridDirection::UpRight => (true, true, true),
+        }
     }
 }
 
@@ -321,7 +361,7 @@ impl ListLayout {
         }
     }
     
-    pub fn render<T: TextBuffer>(&self, rect: Rect, buf: &mut T) -> std::io::Result<()> {
+    pub fn render(&self, rect: Rect, buf: &mut Drawer) {
         let mut text = String::new();
         for (item, y) in self.items.iter().zip(0..rect.h as usize) {
             if y > 0 {
@@ -406,7 +446,7 @@ impl TextLayout {
         self.with_text(text, spacing)
     }
 
-    pub fn render_cut(&self, rect: &mut Rect, buf: &mut impl TextBuffer) -> std::io::Result<()> {
+    pub fn render_cut(&self, rect: &mut Rect, buf: &mut Drawer) {
         let lines: Vec<String> = self.sections.iter().flat_map(|section| section.to_lines(rect.w as usize, self.wrap_mode)).collect();
         let h = (lines.len() as u16).min(rect.h);
 
@@ -416,13 +456,12 @@ impl TextLayout {
         for (line, y) in lines.into_iter().zip(0..text_height) {
             let w = (grapheme_count(&line) as u16).min(rect.w);
             let x = self.centered.then(|| (rect.w - w) / 2).unwrap_or_default();
-            buf.write_line(rect.x + x, rect.y + y_start + y, line)?;
+            buf.write_line(rect.x + x, rect.y + y_start + y, line);
         }
         rect.cut_mut(Side::Top, y_start + text_height);
-        Ok(())
     }
     
-    pub fn render(&self, rect: Rect, buf: &mut impl TextBuffer) -> std::io::Result<()> {
+    pub fn render(&self, rect: Rect, buf: &mut Drawer) {
         self.render_cut(&mut rect.clone(), buf)
     }
     
@@ -556,83 +595,31 @@ impl Section {
     }
 }
 
-pub trait TextBuffer {
-    fn write_line<D: Display>(&mut self, x: u16, y: u16, line: D) -> std::io::Result<()>;
-    fn show_cursor(&mut self, x: u16, y: u16);
-    fn cursor(&self) -> Option<(u16, u16)>;
-    fn safe_rect(&self) -> Rect;
-    fn margin_rect(&self) -> Rect;
-    fn clear(&mut self) -> std::io::Result<()>;
-    fn flush(&mut self) -> std::io::Result<()>;
-}
-
-pub struct TerminalBuffer {
-    w: u16,
-    h: u16,
-    bottom_margin: u16,
-    cursor: Option<(u16, u16)>
-}
-
-impl TerminalBuffer {
-    pub fn new(bottom_margin: u16) -> Self {
-        let (w, h) = terminal::size().unwrap();
-        Self { w, h, bottom_margin, cursor: None }
-    }
-}
-
-impl TextBuffer for TerminalBuffer {
-    fn write_line<D: Display>(&mut self, x: u16, y: u16, text: D) -> std::io::Result<()> {
-        if y >= self.h || x >= self.w {
-            return Ok(());
-        }
-        stdout()
-            .queue(cursor::MoveTo(x, y))?
-            .queue(style::Print(text))?;
-        Ok(())
-    }
-    
-    fn flush(&mut self) -> std::io::Result<()> {
-        if let Some((x, y)) = self.cursor {
-            stdout()
-                .queue(cursor::MoveTo(x, y))?
-                .queue(cursor::Show)?;
-            self.cursor = None;
-        }
-        stdout().flush()
-    }
-    
-    fn clear(&mut self) -> std::io::Result<()> {
-        stdout().queue(terminal::Clear(terminal::ClearType::All))?;
-        Ok(())
-    }
-    
-    fn safe_rect(&self) -> Rect {
-        rect(0, 0, self.w, self.h.saturating_sub(self.bottom_margin))
-    }
-    
-    fn margin_rect(&self) -> Rect {
-        rect(0, self.h.saturating_sub(self.bottom_margin), self.w, self.bottom_margin)
-    }
-    
-    fn show_cursor(&mut self, x: u16, y: u16) {
-        self.cursor = Some((x, y));
-    }
-    
-    fn cursor(&self) -> Option<(u16, u16)> {
-        self.cursor
-    }
-}
-
-#[derive(PartialEq)]
-pub struct VecBuffer {
+pub struct Drawer {
     text: Vec<String>,
     w: u16,
     h: u16,
     bottom_margin: u16,
+    right_margin: u16,
     cursor: Option<(u16, u16)>,
+    
 }
 
-impl std::fmt::Display for VecBuffer {
+pub struct Logger {
+    log: Vec<String>,
+}
+
+impl Logger {
+    pub fn log(&mut self, log: String) {
+        self.log.push(log);
+    }
+    
+    pub(crate) fn new() -> Self {
+        Self { log: Vec::new() }
+    }
+}
+
+impl std::fmt::Display for Drawer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for y in 0..self.h as usize {
             for x in 0..self.w as usize {
@@ -646,16 +633,16 @@ impl std::fmt::Display for VecBuffer {
     }
 }
 
-impl std::fmt::Debug for VecBuffer {
+impl std::fmt::Debug for Drawer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VecBuffer").field("text", &self.to_string()).field("w", &self.w).field("h", &self.h).field("bottom_margin", &self.bottom_margin).finish()
     }
 }
 
-impl VecBuffer {
-    pub(crate) fn new(w: u16, h: u16, bottom_margin: u16) -> Self {
+impl Drawer {
+    pub(crate) fn new(w: u16, h: u16, bottom_margin: u16, right_margin: u16) -> Self {
         let text = vec![String::from(" "); (w * h) as usize];
-        Self { text, w, h, bottom_margin, cursor: None }
+        Self { text, w, h, bottom_margin, right_margin, cursor: None }
     }
 
     #[cfg(test)]
@@ -672,56 +659,55 @@ impl VecBuffer {
                 text.push(grapheme.to_string());
             }
         }
-        Some(Self { text, w: w as u16, h: h as u16, bottom_margin: 0, cursor: None })
+        Some(Self { text, w: w as u16, h: h as u16, bottom_margin: 0, cursor: None, right_margin: 0})
     }
-}
 
-impl TextBuffer for VecBuffer {
-    fn write_line<D: std::fmt::Display>(&mut self, x: u16, y: u16, text: D) -> std::io::Result<()> {
+    pub(crate) fn write_line<D: std::fmt::Display>(&mut self, x: u16, y: u16, text: D) {
         for (i, ch) in text.to_string().graphemes(true).enumerate() {
             if x + i as u16 >= self.w || y >= self.h {
-                return Ok(());
+                return;
             }
             self.text[y as usize * self.w as usize + x as usize + i] = ch.to_string();
         }
-        Ok(())
     }
     
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-    
-    fn clear(&mut self) -> std::io::Result<()> {
-        self.text = vec![String::from(" "); (self.w * self.h) as usize];
-        Ok(())
-    }
-    
-    fn safe_rect(&self) -> Rect {
-        rect(0, 0, self.w, self.h.saturating_sub(self.bottom_margin))
+    pub fn safe_rect(&self) -> Rect {
+        rect(0, 0, self.w.saturating_sub(self.right_margin), self.h.saturating_sub(self.bottom_margin))
     }
 
-    fn margin_rect(&self) -> Rect {
-        rect(0, self.h.saturating_sub(self.bottom_margin), self.w, self.bottom_margin)
+    pub(crate) fn right_margin(&self) -> Rect {
+        rect(self.w.saturating_sub(self.right_margin), 0, self.right_margin, self.h)
     }
     
-    fn show_cursor(&mut self, x: u16, y: u16) {
+    pub(crate) fn show_cursor(&mut self, x: u16, y: u16) {
         self.cursor = Some((x, y))
     }
     
-    fn cursor(&self) -> Option<(u16, u16)> {
+    pub(crate) fn cursor(&self) -> Option<(u16, u16)> {
         self.cursor
+    }
+    
+    pub(crate) fn reset(&mut self, w: u16, h: u16) {
+        if self.h != h || self.w != w {
+            self.w = w;
+            self.h = h;
+            self.text = vec![String::from(" "); (w * h) as usize];
+        } else {
+            self.text.fill(" ".to_string());
+        }
+        self.cursor = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
-    use crate::ui::{Border, BorderStyle, Side, TextBuffer, TextLayout, VecBuffer, WrapMode, rect};
+    use crate::ui::{Border, BorderStyle, Drawer, GridDirection, Side, TextLayout, WrapMode, rect};
 
     fn test_wrap_mode(wrap_mode: WrapMode, text: &str, w: u16, h: u16, spacing: u8) -> String {
-        let mut buf = VecBuffer::new(w, h, 0);
+        let mut buf = Drawer::new(w, h, 0, 0);
         let rect = buf.safe_rect();
-        TextLayout::new().with_wrap_mode(wrap_mode).with_text(text.to_string(), spacing).render(rect, &mut buf).unwrap();
+        TextLayout::new().with_wrap_mode(wrap_mode).with_text(text.to_string(), spacing).render(rect, &mut buf);
         buf.to_string()
     }
 
@@ -812,13 +798,13 @@ mod tests {
             bottom: "6",
             bottom_right: "7",
         };
-        let mut buf = VecBuffer::new(4, 3, 0);
-        Border::new(rect(0, 0, 4, 3), style).render(&mut buf).unwrap();
-        assert_eq!(buf, VecBuffer::from_lines(vec![
+        let mut buf = Drawer::new(4, 3, 0, 0);
+        Border::new(rect(0, 0, 4, 3), style).render(&mut buf);
+        assert_eq!(buf.to_string(), Drawer::from_lines(vec![
             "0112",
             "3  4",
             "5667",
-        ]).unwrap());
+        ]).unwrap().to_string());
     }
 
     #[test]
@@ -863,19 +849,19 @@ mod tests {
     #[test]
     fn to_grid() {
         let a = rect(0, 0, 10, 6);
-        assert_eq!(a.to_grid(2, 2, 0, false), vec![
+        assert_eq!(a.divide_grid(2, 2, 0, 0, GridDirection::LeftDown), vec![
             rect(0, 0, 5, 3),
             rect(5, 0, 5, 3),
             rect(0, 3, 5, 3),
             rect(5, 3, 5, 3),
         ]);
-        assert_eq!(a.to_grid(2, 2, 0, true), vec![
+        assert_eq!(a.divide_grid(2, 2, 0, 0, GridDirection::DownLeft), vec![
             rect(0, 0, 5, 3),
             rect(0, 3, 5, 3),
             rect(5, 0, 5, 3),
             rect(5, 3, 5, 3),
         ]);
-        assert_eq!(a.to_grid(5, 2, 0, false), vec![
+        assert_eq!(a.divide_grid(5, 2, 0, 0, GridDirection::LeftDown), vec![
             rect(0, 0, 2, 3),
             rect(2, 0, 2, 3),
             rect(4, 0, 2, 3),
@@ -889,7 +875,7 @@ mod tests {
         ]);
 
         let a = rect(0, 0, 12, 6);
-        assert_eq!(a.to_grid(2, 2, 2, false), vec![
+        assert_eq!(a.divide_grid(2, 2, 2, 2, GridDirection::LeftDown), vec![
             rect(0, 0, 5, 2),
             rect(7, 0, 5, 2),
             rect(0, 4, 5, 2),

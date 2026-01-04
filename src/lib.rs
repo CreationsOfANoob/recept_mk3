@@ -1,12 +1,12 @@
-use std::{fmt::Display, io::stdout, path::{Path, PathBuf}, sync::mpsc::{Receiver, Sender}, time::Duration, usize};
+use std::{collections::HashMap, fmt::Display, io::stdout, path::{Path, PathBuf}, sync::mpsc::{Receiver, Sender}, time::Duration, usize};
 use crossterm::{ExecutableCommand, QueueableCommand, cursor, event::{self, KeyCode, KeyEvent, KeyModifiers}, style::Print, terminal};
 use notify::Watcher;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{book::ParseError, ui::{TextBuffer, TextLayout, VecBuffer, WrapMode, grapheme_count}};
+use crate::{bok::ParseError, ui::{Drawer, GridDirection, Logger, Rect, TextLayout, WrapMode, grapheme_count}};
 
 pub mod ui;
-pub mod book;
+pub mod bok;
 
 pub struct FolderWatcher {
     sender: Sender<Result<notify::Event, notify::Error>>,
@@ -161,7 +161,8 @@ pub enum Error {
     NoProjectDir,
     Notify(notify::Error),
     Io(std::io::Error),
-    ParseError(ParseError)
+    ParseError(ParseError),
+    Trash(trash::Error),
 }
 
 impl From<ParseError> for Error {
@@ -173,6 +174,12 @@ impl From<ParseError> for Error {
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
         Self::Io(err)
+    }
+}
+
+impl From<trash::Error> for Error {
+    fn from(err: trash::Error) -> Self {
+        Self::Trash(err)
     }
 }
 
@@ -197,33 +204,26 @@ fn exit() -> std::io::Result<()> {
     Ok(())
 }
 
-pub struct CommandSignature<C: Display> {
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]
+pub struct CommandSignature {
     key: KeyCode,
     hidden: bool,
     ctrl: bool,
-    command: C,
-    name_override: Option<String>,
 }
 
-impl<C: Display> Display for CommandSignature<C> {
+impl Display for CommandSignature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.ctrl {
             f.write_str("^")?;
         }
         f.write_str(&format_key(self.key))?;
-        f.write_str(": ")?;
-        if let Some(alt) = &self.name_override {
-            f.write_str(alt)?;
-        } else {
-            write!(f, "{}", self.command)?;
-        }
         Ok(())
     }
 }
 
-impl<C: Display> CommandSignature<C> {
-    pub fn new(key: KeyCode, command: C) -> Self {
-        Self { key, hidden: false, command, ctrl: false, name_override: None }
+impl CommandSignature {
+    pub fn new(key: KeyCode) -> Self {
+        Self { key, hidden: false, ctrl: false }
     }
 
     pub fn hidden(self) -> Self {
@@ -233,65 +233,84 @@ impl<C: Display> CommandSignature<C> {
     pub fn ctrl(self) -> Self {
         Self { ctrl: true, ..self }
     }
-    
-    fn with_override(self, name: String) -> Self {
-        Self { name_override: Some(name), ..self }
+}
+
+pub struct Commands<C: Display> {
+    rects: Vec<CommandList<C>>,
+}
+impl<C: Display> Commands<C> {
+    fn new() -> Self {
+        Self { rects: Vec::new() }
     }
+    
+    fn reset(&mut self) {
+        self.rects.clear();
+    }
+
+    pub fn new_rect(&mut self, commands: CommandList<C>) {
+        self.rects.push(commands);
+    }
+    
+    fn all(&self) -> Vec<(&CommandSignature, &C)> {
+        let mut commands = Vec::new();
+        for rect in &self.rects {
+            commands.extend(rect.public.iter().map(|(s, c)| (s, &c.command)));
+            commands.extend(rect.hidden.iter().map(|(s, c)| (s, &c.command)));
+        }
+        commands
+    }
+
+    
+}
+
+struct CommandEntry<C: Display> {
+    command: C,
+    i: usize,
 }
 
 pub struct CommandList<C: Display> {
-    public: Vec<Option<CommandSignature<C>>>,
-    hidden: Vec<Option<CommandSignature<C>>>,
+    rect: Rect,
+    public: HashMap<CommandSignature, CommandEntry<C>>,
+    hidden: HashMap<CommandSignature, CommandEntry<C>>,
 }
 
 impl<C: Display> CommandList<C> {
-    pub fn new() -> Self {
-        Self { public: Vec::new(), hidden: Vec::new() }
+    pub fn new(rect: Rect) -> Self {
+        Self { public: HashMap::new(), hidden: HashMap::new(), rect }
     }
 
-    fn with_public(self, signature: Option<CommandSignature<C>>) -> Self {
+    fn with_public(self, signature: CommandSignature, command: C) -> Self {
         let mut public = self.public;
-        public.push(signature);
+        public.insert(signature, CommandEntry { command, i: public.len() });
         Self { public, ..self }
     }
 
-    fn with_hidden(self, signature: Option<CommandSignature<C>>) -> Self {
+    fn with_hidden(self, signature: CommandSignature, command: C) -> Self {
         let mut hidden = self.hidden;
-        hidden.push(signature);
+        hidden.insert(signature, CommandEntry { command, i: hidden.len() });
         Self { hidden, ..self }
     }
 
     pub fn command(self, key: KeyCode, command: C) -> Self {
-        self.with_public(Some(CommandSignature::new(key, command)))
-    }
-
-    pub fn ctrl_if(self, cond: bool, key: KeyCode, command: C) -> Self {
-        self.with_public(cond.then(|| CommandSignature::new(key, command).ctrl()))
-    }
-
-    pub fn command_if(self, cond: bool, key: KeyCode, command: C) -> Self {
-        self.with_public(cond.then(|| CommandSignature::new(key, command)))
+        self.with_public(CommandSignature::new(key), command)
     }
 
     pub fn hidden(self, key: KeyCode, command: C) -> Self {
-        self.with_hidden(Some(CommandSignature::new(key, command)))
+        self.with_hidden(CommandSignature::new(key), command)
     }
 
     pub fn ctrl(self, key: KeyCode, command: C) -> Self {
-        self.with_public(Some(CommandSignature::new(key, command).ctrl()))
+        self.with_public(CommandSignature::new(key).ctrl(), command)
     }
 
-    pub fn ctrl_with_name_override(self, key: KeyCode, command: C, name: String) -> Self {
-        self.with_public(Some(CommandSignature::new(key, command).ctrl().with_override(name)))
-    }
-
-    pub fn empty_slot(self) -> Self {
-        self.with_public(None)
-    }
-    
     pub fn hidden_ctrl(self, key: KeyCode, command: C) -> Self {
-        self.with_hidden(Some(CommandSignature::new(key, command).ctrl()))
+        self.with_hidden(CommandSignature::new(key).ctrl(), command)
     }
+}
+
+pub enum TextEditResponse {
+    Escape,
+    Return,
 }
 
 pub enum TextEditEvent {
@@ -303,7 +322,9 @@ pub enum TextEditEvent {
     Backspace { word: bool },
     Enter,
     Delete,
+    Escape,
 }
+
 #[cfg(test)]
 impl TextEditEvent {
     fn backspace() -> TextEditEvent {
@@ -316,57 +337,62 @@ impl TextEditEvent {
 }
 
 pub trait App<C: Display> {
-    fn draw<T: TextBuffer>(&self, target: &mut T) -> std::io::Result<()>;
-    fn commands(&self) -> CommandList<C>;
-    fn execute_command(&mut self, command: C);
-    fn refresh(&mut self) -> bool;
-    fn edit_text(&mut self, edit_event: TextEditEvent);
+    fn draw(&self, target: &mut Drawer, commands: &mut Commands<C>);
+    fn execute_command(&mut self, command: &C, log: &mut Logger) -> Result<(), Error>;
+    fn refresh(&mut self, log: &mut Logger) -> bool;
+    fn edit_text(&mut self, edit_event: TextEditEvent, log: &mut Logger);
     fn is_editing_text(&self) -> bool;
 }
 
-pub fn run<C: Display, A: App<C>>(app: A) -> std::io::Result<()> {
+pub fn run<C: Display, A: App<C>>(app: A) -> Result<(), Error> {
     init()?;
     let result = main_loop(app);
     exit()?;
     result
 }
 
-fn main_loop<C: Display, A: App<C>>(mut app: A) -> std::io::Result<()> {
+fn main_loop<C: Display, A: App<C>>(mut app: A) -> Result<(), Error> {
     let mut redraw = true;
+    let (w, h) = terminal::size()?;
+    let mut buf = Drawer::new(w, h, 0, 0);
+    let mut log = Logger::new();
+    let mut commands = Commands::new();
     loop {
-        let commands = app.commands();
-
         if redraw {
             redraw = false;
 
             let (w, h) = terminal::size()?;
-            let mut buf = VecBuffer::new(w, h, 2);
+            buf.reset(w, h);
+            commands.reset();
 
-            let mut command_bar = buf.margin_rect();
+            let mut command_bar = buf.right_margin();
             command_bar.inset_mut(1, 0);
 
-            buf.clear()?;
             stdout().queue(cursor::Hide)?;
-            app.draw(&mut buf)?;
-            for (index, slot) in command_bar.to_grid(5, 2, 0, true).into_iter().enumerate() {
-                let Some(opt) = commands.public.get(index) else {
-                    break;
-                };
-                let Some(command) = opt else {
-                    continue;
-                };
-                if command.hidden {
-                    continue;
+            app.draw(&mut buf, &mut commands);
+
+            // TextLayout::new().with_items(log.items(), 0).with_wrap_mode(WrapMode::CutOff { marker: "...", cut_start: false }).render(buf.right_margin(), &mut buf);
+            
+            for cmd_rect in &commands.rects {
+                let mut keys: Vec<(&CommandSignature, &C, usize)> = cmd_rect.public.iter().map(|(k, v)| (k, &v.command, v.i)).collect();
+                keys.sort_by_key(|(_, _, i)| *i);
+                for (index, slot) in cmd_rect.rect.to_slots(20, 1, 2, 0, GridDirection::LeftUp).into_iter().enumerate() {
+                    let Some((sign, command, _)) = keys.get(index) else {
+                        break;
+                    };
+                    if sign.hidden {
+                        continue;
+                    }
+                    TextLayout::new().with_text(format!("{sign}: {command}"), 0).render(slot, &mut buf);
                 }
-                TextLayout::new().with_text(command.to_string(), 0).render(slot, &mut buf)?;
             }
-            buf.flush()?;
 
             stdout()
                 .execute(terminal::BeginSynchronizedUpdate)?
                 .execute(cursor::MoveTo(0, 0))?
                 .execute(Print(buf.to_string()))?
                 .execute(cursor::Hide)?;
+            
             if let Some((x, y)) = buf.cursor() {
                 stdout()
                     .execute(cursor::MoveTo(x, y))?
@@ -382,22 +408,22 @@ fn main_loop<C: Display, A: App<C>>(mut app: A) -> std::io::Result<()> {
                         return Ok(());
                     }
                     let mut consumed = false;
-                    for opt in commands.public.into_iter().chain(commands.hidden.into_iter()) {
-                        let Some(CommandSignature { key, ctrl, command, .. }) = opt else {
-                            continue;
-                        };
-                        if 
-                            key_event.is_press() && 
-                            key_event.code.to_string().eq_ignore_ascii_case(&key.to_string()) && 
-                            (key_event.modifiers == KeyModifiers::CONTROL) == ctrl // CTRL status equal to that of command 
-                        {
-                            redraw = true;
-                            consumed = true;
-                            app.execute_command(command);
+                    if !app.is_editing_text() || key_event.modifiers == KeyModifiers::CONTROL || !matches!(key_event.code, KeyCode::Char(_) | KeyCode::Enter) {
+                        // Only check commands if not editing text or if event has CTRL modifier or is otherwise not a written character
+                        for (CommandSignature { key, hidden: _, ctrl }, command) in commands.all() {
+                            if 
+                                key_event.is_press() && 
+                                key_event.code.to_string().eq_ignore_ascii_case(&key.to_string()) && 
+                                (key_event.modifiers == KeyModifiers::CONTROL) == *ctrl // CTRL status equal to that of command 
+                            {
+                                redraw = true;
+                                consumed = true;
+                                app.execute_command(command, &mut log)?;
+                            }
                         }
                     }
                     if !consumed && app.is_editing_text() && let Some(edit_event) = text_edit_event(key_event) {
-                        app.edit_text(edit_event);
+                        app.edit_text(edit_event, &mut log);
                         redraw = true;
                     }
                 },
@@ -405,7 +431,7 @@ fn main_loop<C: Display, A: App<C>>(mut app: A) -> std::io::Result<()> {
                 _ => ()
             }
         }
-        redraw = redraw | app.refresh();
+        redraw = redraw | app.refresh(&mut log);
     }
 }
 
@@ -422,6 +448,7 @@ fn text_edit_event(key_event: event::KeyEvent) -> Option<TextEditEvent> {
         KeyCode::Up => Some(TextEditEvent::Up),
         KeyCode::Down => Some(TextEditEvent::Down),
         KeyCode::Delete => Some(TextEditEvent::Delete),
+        KeyCode::Esc => Some(TextEditEvent::Escape),
         KeyCode::Char(s) => Some(TextEditEvent::Char(s)),
         _ => None,
     }
@@ -435,6 +462,7 @@ fn format_key(key: KeyCode) -> String {
         KeyCode::Down => "↓".to_string(),
         KeyCode::Char(' ') => "SPACE".to_string(),
         KeyCode::Enter => "RETUR".to_string(),
+        KeyCode::Backspace => "DEL".to_string(),
         other => other.to_string().to_uppercase(),
     }
 }
@@ -459,6 +487,9 @@ fn type_of_str(s: &str) -> CharType {
 }
 
 impl TextEditor {
+    pub fn single_line() -> Self {
+        Self::default().single_line_mode()
+    }
     pub fn from_string(s: String) -> Self {
         let lines = s.lines().map(|s| s.to_string()).collect();
         Self { lines, ..Default::default() }
@@ -584,8 +615,8 @@ impl TextEditor {
         n - remaining
     }
 
-    /// Returns true if enter was pressed and single line mode is active
-    pub fn edit(&mut self, edit_event: TextEditEvent) -> bool {
+    /// Returns true if an escape was indicated, either by Enter in single line mode, or by pressing Escape.
+    pub fn edit(&mut self, edit_event: TextEditEvent) -> Option<TextEditResponse> {
         // Sanitize indices
 
         match edit_event {
@@ -603,7 +634,7 @@ impl TextEditor {
             },
             TextEditEvent::Enter => {
                 if self.single_line_mode {
-                    return true;
+                    return Some(TextEditResponse::Return);
                 }
                 let new_line_i = (self.line_i + 1).min(self.lines.len());
                 self.lines.insert(new_line_i, String::new());
@@ -626,15 +657,15 @@ impl TextEditor {
                 self.delete(word.then(|| self.seek_until_different(false) as isize * -1).unwrap_or(-1))
             }
             TextEditEvent::Delete => self.delete(1),
+            TextEditEvent::Escape => return Some(TextEditResponse::Escape),
         }
-        false
+        None
     }
     
-    pub fn render<T: TextBuffer>(&self, placeholder: &str, rect: ui::Rect, buf: &mut T) -> std::io::Result<()> {
+    pub fn render(&self, placeholder: &str, rect: ui::Rect, buf: &mut Drawer) {
         let text = self.to_string();
-        TextLayout::new().with_wrap_mode(WrapMode::CutOff { marker: "...", cut_start: false }).with_text(if text == "" { placeholder.to_string() } else { text }, 0).render(rect, buf)?;
+        TextLayout::new().with_wrap_mode(WrapMode::CutOff { marker: "...", cut_start: false }).with_text(if text == "" { placeholder.to_string() } else { text }, 0).render(rect, buf);
         buf.show_cursor(rect.x + (self.grapheme_i as u16).min(rect.w).min(self.line_grapheme_count() as u16), rect.y + (self.line_i as u16).min(rect.h));
-        Ok(())
     }
     
     pub fn single_line_mode(self) -> TextEditor {
@@ -643,6 +674,29 @@ impl TextEditor {
     
     fn line_grapheme_count(&self) -> usize {
         self.lines.get(self.line_i).map_or(0, |s| grapheme_count(s))
+    }
+    
+    pub fn with_cursor_last(mut self) -> TextEditor {
+        self.set_cursor_last();
+        self
+    }
+    
+    pub fn set_cursor_last(&mut self) {
+        let line_i = self.lines.len().saturating_sub(1);
+        let grapheme_i = if let Some(line) = self.lines.get(line_i) {
+            grapheme_count(line)
+        } else {
+            0
+        };
+        self.grapheme_i = grapheme_i;
+        self.line_i = line_i;
+    }
+
+    pub fn set_text(&mut self, text: &str) {
+        self.lines.clear();
+        for line in text.lines() {
+            self.lines.push(line.to_string());
+        }
     }
 }
 

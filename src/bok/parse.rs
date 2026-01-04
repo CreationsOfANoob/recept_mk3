@@ -1,6 +1,6 @@
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::book::{Recept, Storhet, Värde, ingrediens, ingrediensrubrik};
+use crate::bok::{Recept, Storhet, Värde, ingrediens, ingrediensrubrik};
 
 const UNDERRUBRIK: &str = "/";
 const INGREDIENSMARKÖR: &str = "ingrediens";
@@ -136,6 +136,8 @@ const STEGMARKÖR: &[&str] = &[
 fn clean_numbers(s: &str) -> String {
     s.trim()
         .replace(",", ".")
+        .replace("–", "-")
+        .replace("–", "-")
         .replace("½", "0.5")
         .replace("⅓", "0.333333")
         .replace("⅔", "0.666667")
@@ -199,6 +201,7 @@ pub(super) fn parse_storhet(s: &str) -> Option<(Storhet, String)> {
         string = stripped.to_string();
         sign = -1;
     }
+    string = string.replace("–", "-");
 
     let remainder = if let Some(hyph_i) = string.strip_prefix("-").unwrap_or(&string).find("-") {
         let (pre, post) = string.split_at(hyph_i);
@@ -363,7 +366,7 @@ fn instructions_start(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::book::{Storhet, parse::parse_storhet};
+    use crate::bok::{Storhet, parse::parse_storhet};
 
     #[test]
     fn parse_storheter() {
