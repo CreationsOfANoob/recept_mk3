@@ -75,7 +75,8 @@ impl Recept {
         };
         let extra_info = [
             storlek_string,
-            self.tillagningstid().map(|tid| format!("Tillagningstid {tid}"))
+            self.tillagningstid().map(|tid| format!("Tillagningstid {tid}")),
+            self.ugnstemperatur().map(|temp| format!("Ugnstmeperatur {temp}")),
         ].into_iter().flatten().collect::<Vec<String>>().join(". ");
 
         let mut rubrikavsnitt = TextLayout::new()
@@ -92,7 +93,7 @@ impl Recept {
 
         let mut ingredients = self.ingredienser.clone();
         for ip in &mut ingredients {
-            ip.scale(fac, true);
+            ip.scale(fac);
         }
         let ingredients = TextLayout::new()
             .indent_body()
@@ -179,72 +180,182 @@ impl Display for Recept {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Clone)]
+#[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
+enum Precision {
+    #[default]
+    Exakt,
+    Cirka,
+    MindreÄn,
+    StörreÄn,
+}
+
+impl Display for Precision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Precision::Exakt => "",
+            Precision::Cirka => "ca",
+            Precision::MindreÄn => "<",
+            Precision::StörreÄn => ">",
+        })
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Clone, Copy)]
 pub struct Storhet {
     pub värde: Värde,
+    precision: Precision,
     enhet: MåttEnhet,
-    cirka: bool,
 }
 
 impl Display for Storhet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if TEMPERATURENHETER.contains(&self.enhet.as_str()) {
+        let corrected = self.clone().with_optimal_unit();
+        if TEMPERATURENHETER.contains(&corrected.enhet.as_str()) {
             f.write_str(format!("{} {}{}",
-                self.cirka.then(|| "ca").unwrap_or_default(),
-                self.värde,
-                self.enhet.as_str()).trim())
+                corrected.precision,
+                corrected.värde,
+                corrected.enhet.as_str()).trim())
         } else {
-            let pluralsträng = if self.värde.is_plural() {
-                self.enhet.pluralform.unwrap_or(self.enhet.as_str())
+            let pluralsträng = if corrected.värde.is_plural() {
+                corrected.enhet.pluralform.unwrap_or(corrected.enhet.as_str())
             } else {
-                self.enhet.as_str()
+                corrected.enhet.as_str()
             };
             f.write_str(format!("{} {} {}",
-                self.cirka.then(|| "ca").unwrap_or_default(),
-                self.värde,
+                corrected.precision,
+                corrected.värde,
                 pluralsträng).trim())
         }
     }
 }
 
-#[derive(Debug, Clone)]
+impl Storhet {
+    pub fn värde(värde: f32) -> Self {
+        Self {
+            värde: Värde::Skalär(värde),
+            ..Default::default()
+        }
+    }
+
+    pub fn intervall(värde: Range<f32>) -> Self {
+        Self {
+            värde: Värde::Intervall { start: värde.start, end: värde.end },
+            ..Default::default()
+        }
+    }
+
+    pub fn med_enhet(self, enhet: &str) -> Self {
+        let mut hittad_enhet = None;
+        for måttenhet in MÅTTENHETER {
+            if enhet == måttenhet.as_str() {
+                hittad_enhet = Some(måttenhet);
+                break;
+            } else if let Some(plural) = måttenhet.pluralform && plural == enhet {
+                hittad_enhet = Some(måttenhet);
+                break;
+            }
+        }
+        Self { enhet: *hittad_enhet.unwrap_or(&MåttEnhet::ENHETSLÖS), ..self }
+    }
+
+    pub fn cirka(self) -> Self {
+        Self {
+            precision: Precision::Cirka,
+            ..self
+        }
+    }
+
+    pub fn mindre_än(self) -> Self {
+        Self {
+            precision: Precision::MindreÄn,
+            ..self
+        }
+    }
+
+    pub fn större_än(self) -> Self {
+        Self {
+            precision: Precision::StörreÄn,
+            ..self
+        }
+    }
+
+    fn convert(self, enhet: MåttEnhet) -> Option<Self> {
+        if enhet.dimension != self.enhet.dimension {
+            return None;
+        }
+        let to_base = self.värde.add(self.enhet.noll).mul(self.enhet.faktor);
+        let to_new = to_base.mul(1.0 / enhet.faktor).add(-enhet.noll);
+        Some(Self { värde: to_new, enhet, ..self })
+    }
+
+    fn with_optimal_unit(self) -> Self {
+        let mut best_cand = self.clone();
+        let mut best_cand_d = self.värde.average().log10();
+        if best_cand_d < 0.0 {
+            best_cand_d = f32::MAX;
+        }
+        for cand in MÅTTENHETER {
+            if cand.dimension != self.enhet.dimension {
+                continue;
+            }
+            let Some(converted) = self.clone().convert(*cand) else {
+                continue;
+            };
+            let cand_d = converted.värde.average().log10();
+            if cand_d < best_cand_d && cand_d >= 0.0 {
+                best_cand_d = cand_d;
+                best_cand = converted;
+            }
+        }
+        best_cand
+    }
+}
+
+impl Mul<f32> for Storhet {
+    type Output = Self;
+
+    fn mul(self, rhs: f32) -> Self {
+        Self {
+            värde: self.värde * rhs,
+            ..self
+        }.with_optimal_unit()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum Värde {
     Skalär(f32),
-    Intervall(Range<f32>),
+    Intervall { start: f32, end: f32 },
 }
+
 impl Värde {
     fn average(&self) -> f32 {
         match self {
             Värde::Skalär(v) => *v,
-            Värde::Intervall(range) => (range.start + range.end) * 0.5,
+            Värde::Intervall { start, end } => (start + end) * 0.5,
         }
     }
 
     pub fn try_parse(s: &str) -> Option<Self> {
         Some(parse::parse_storhet(s)?.0.värde)
     }
-
-    fn scale(&mut self, scale: &f32) {
-        match self {
-            Värde::Skalär(v) => *v *= scale,
-            Värde::Intervall(range) => {
-                range.start * range.start * scale..range.end * scale;
-            }
-        }
-    }
     
     fn is_plural(&self) -> bool {
         match self {
             Värde::Skalär(v) => v.abs() >= 2.0,
-            Värde::Intervall(range) => range.start.abs() >= 2.0 || range.end.abs() >= 2.0,
+            Värde::Intervall { start, end } => start.abs() >= 2.0 || end.abs() >= 2.0,
         }
     }
     
     pub fn saturating_sub(&self, rhs: f32) -> Värde {
         match self {
             Värde::Skalär(v) => Värde::Skalär((v - rhs).max(0.0)),
-            Värde::Intervall(range) => Värde::Intervall((range.start - rhs).max(0.0)..(range.end - rhs).max(0.0)),
+            Värde::Intervall { start, end } => Värde::Intervall {start: (start - rhs).max(0.0), end: (end - rhs).max(0.0) },
         }
+    }
+    
+    fn intervall(start: f32, end: f32) -> Värde {
+        Self::Intervall { start, end }
     }
 }
 
@@ -252,10 +363,48 @@ impl Display for Värde {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Värde::Skalär(v) => f.write_str(&format_number(*v)),
-            Värde::Intervall(range) => f.write_str(&format!("{}-{}", 
-                format_number(range.start),
-                format_number(range.end)
+            Värde::Intervall {start, end} => f.write_str(&format!("{}-{}", 
+                format_number(*start),
+                format_number(*end)
             )),
+        }
+    }
+}
+
+impl PartialEq for Värde {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Skalär(l0), Self::Skalär(r0)) => (l0 - r0).abs() < 0.0001,
+            (Self::Intervall { start: s0, end: e0 }, Self::Intervall { start: s1, end: e1 }) => s0 == s1 && e0 == e1,
+            _ => false,
+        }
+    }
+}
+
+impl Default for Värde {
+    fn default() -> Self {
+        Self::Skalär(0.0)
+    }
+}
+
+impl Mul<f32> for Värde {
+    type Output = Self;
+
+    fn mul(self, rhs: f32) -> Self {
+        match self {
+            Värde::Skalär(v) => Värde::Skalär(v * rhs),
+            Värde::Intervall { start, end } => Värde::Intervall { start: start * rhs, end: end * rhs }
+        }
+    }
+}
+
+impl Add<f32> for Värde {
+    type Output = Self;
+
+    fn add(self, rhs: f32) -> Self {
+        match self {
+            Värde::Skalär(v) => Värde::Skalär(v + rhs),
+            Värde::Intervall { start, end } => Värde::Intervall { start: start + rhs, end: end + rhs }
         }
     }
 }
@@ -295,132 +444,6 @@ fn format_number(v: f32) -> String {
     }
 }
 
-impl PartialEq for Värde {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Skalär(l0), Self::Skalär(r0)) => (l0 - r0).abs() < 0.0001,
-            (Self::Intervall(l0), Self::Intervall(r0)) => l0 == r0,
-            _ => false,
-        }
-    }
-}
-
-impl Default for Värde {
-    fn default() -> Self {
-        Self::Skalär(0.0)
-    }
-}
-
-impl Mul<f32> for Värde {
-    type Output = Self;
-
-    fn mul(self, rhs: f32) -> Self {
-        match self {
-            Värde::Skalär(v) => Värde::Skalär(v * rhs),
-            Värde::Intervall(range) => Värde::Intervall(range.start * rhs..range.end * rhs)
-        }
-    }
-}
-
-impl Add<f32> for Värde {
-    type Output = Self;
-
-    fn add(self, rhs: f32) -> Self {
-        match self {
-            Värde::Skalär(v) => Värde::Skalär(v + rhs),
-            Värde::Intervall(range) => Värde::Intervall(range.start + rhs..range.end + rhs),
-        }
-    }
-}
-
-impl Storhet {
-    pub fn värde(värde: f32) -> Self {
-        Self {
-            värde: Värde::Skalär(värde),
-            ..Default::default()
-        }
-    }
-
-    pub fn cirka_värde(värde: f32) -> Self {
-        Self {
-            värde: Värde::Skalär(värde),
-            cirka: true,
-            ..Default::default()
-        }
-    }
-
-    pub fn intervall(värde: Range<f32>) -> Self {
-        Self {
-            värde: Värde::Intervall(värde),
-            ..Default::default()
-        }
-    }
-
-    pub fn cirka_intervall(värde: Range<f32>) -> Self {
-        Self {
-            värde: Värde::Intervall(värde),
-            cirka: true,
-            ..Default::default()
-        }
-    }
-
-    pub fn med_enhet(self, enhet: &str) -> Self {
-        let mut hittad_enhet = None;
-        for måttenhet in MÅTTENHETER {
-            if enhet == måttenhet.as_str() {
-                hittad_enhet = Some(måttenhet);
-                break;
-            } else if let Some(plural) = måttenhet.pluralform && plural == enhet {
-                hittad_enhet = Some(måttenhet);
-                break;
-            }
-        }
-        Self { enhet: *hittad_enhet.unwrap_or(&MåttEnhet::ENHETSLÖS), ..self }
-    }
-
-    #[must_use]
-    fn skala(&self, skala: f32, optimal: bool) -> Self {
-        let mut new = self.clone();
-        new.värde.scale(&skala);
-        if optimal {
-            new.find_optimal_unit();
-        }
-        new
-    }
-
-    fn convert(self, enhet: MåttEnhet) -> Option<Self> {
-        if enhet.dimension != self.enhet.dimension {
-            return None;
-        }
-        let to_base = self.värde.add(self.enhet.noll).mul(self.enhet.faktor);
-        let to_new = to_base.mul(1.0 / enhet.faktor).add(-enhet.noll);
-        Some(Self { värde: to_new, enhet, ..self })
-    }
-    
-    fn find_optimal_unit(&mut self) {
-        let mut best_cand = self.clone();
-        let mut best_cand_d = self.värde.average().log10();
-        if best_cand_d < 0.0 {
-            best_cand_d = f32::MAX;
-        }
-        for cand in MÅTTENHETER {
-            if cand.dimension != self.enhet.dimension {
-                continue;
-            }
-            let Some(converted) = self.clone().convert(*cand) else {
-                continue;
-            };
-            let cand_d = converted.värde.average().log10();
-            if cand_d < best_cand_d && cand_d >= 0.0 {
-                best_cand_d = cand_d;
-                best_cand = converted;
-            }
-        }
-        *self = best_cand;
-    }
-}
-
-
 #[derive(Debug, PartialEq, Clone)]
 pub enum IngrediensPost {
     Ingrediens(Option<Storhet>, String),
@@ -435,9 +458,9 @@ impl IngrediensPost {
         }
     }
     
-    fn scale(&mut self, fac: f32, convert_unit: bool) {
+    fn scale(&mut self, fac: f32) {
         if let IngrediensPost::Ingrediens(Some(storhet), _) = self {
-            *storhet = storhet.skala(fac, convert_unit);
+            *storhet = *storhet * fac;
         }
     }
 }
@@ -475,10 +498,10 @@ mod test {
 
     #[test]
     fn skala_storhet() {
-        assert_eq!(storhet("10 dl").skala(10.0, true), storhet("10 l"));
-        assert_eq!(storhet("15 dl").skala(0.001, true), storhet("1,5 ml"));
-        assert_eq!(storhet("15 dl").skala(0.01, true), storhet("1 msk"));
-        assert_eq!(storhet("1 kg").skala(0.5, true), storhet("500 g"));
+        assert_eq!((storhet("10 dl") * 10.0).to_string(), storhet("10 l").to_string());
+        assert_eq!((storhet("15 dl") * 0.001).to_string(), storhet("1,5 ml").to_string());
+        assert_eq!((storhet("15 dl") * 0.01).to_string(), storhet("1 msk").to_string());
+        assert_eq!((storhet("1 kg") * 0.5).to_string(), storhet("500 g").to_string());
     }
 
     #[test]
@@ -538,7 +561,7 @@ mod test {
         assert_eq!(recept.tillagningstid(), None);
         assert_eq!(recept.storlek(), Some(&Storhet::värde(1.0).med_enhet("portion")));
         assert_eq!(recept.ingredienser(), &[
-            ingrediens(Some(Storhet::cirka_värde(70.0).med_enhet("g")), "spaghetti"),
+            ingrediens(Some(Storhet::värde(70.0).cirka().med_enhet("g")), "spaghetti"),
             ingrediens(Some(Storhet::värde(50.0).med_enhet("g")), "rökt sidfläsk, skinka, bog eller bacon"),
             ingrediens(Some(Storhet::värde(1.0)), "äggula"),
             ingrediens(None, "nymalen svartpeppar"),
@@ -601,7 +624,7 @@ mod test {
         assert_eq!(recept.källa(), None);
         assert_eq!(recept.ugnstemperatur(), Some(&Storhet::värde(200.0).med_enhet("°C")));
         assert_eq!(recept.tillagningstid(), None);
-        assert_eq!(recept.storlek(), Some(&Storhet::cirka_värde(8.0).med_enhet("bitar")));
+        assert_eq!(recept.storlek(), Some(&Storhet::värde(8.0).cirka().med_enhet("bitar")));
         assert_eq!(recept.ingredienser(), &[
             ingrediens(None, "smör till formen"),
             ingrediens(None, "ströbröd till formen"),
@@ -627,6 +650,72 @@ mod test {
             "Grädda mitt i ugnen i ca 10-15 minuter (öka eller minska tiden vid behov beroende på hur kladdig du vill ha den).",
             "Ta ut kladdkakan och låt svalna.",
             "Sikta florsocker över om så önskas.",
+        ]);
+        assert_eq!(Recept::try_parse(recept.to_string()).unwrap(), recept);
+    }
+
+    #[test]
+    fn hamburgerbröd() {
+        let recept = Recept::try_parse("Klassiska hamburgerbröd
+
+Över 60 min
+Baka egna hamburgerbröd och njut av såväl doften som sprids i köket och den goda smaken. Gör dem gärna i förväg och förvara i frysen.
+
+6 st
+1/2
+paket jäst (à 50 g)
+25 g
+smör
+2 1/2 dl
+mjölk
+1/2 tsk
+salt
+1/2 tsk
+strösocker
+1 krm
+gurkmeja (kan uteslutas)
+ca 5 1/2 dl
+vetemjöl special
+1
+ägg
+1 msk
+sesamfrön
+
+Smula jästen i en bunke. Smält smöret i en kastrull. Häll i mjölken och rör om. Värm till 37°C. Tillsätt vätskan i bunken och rör om tills jästen löst sig. Tillsätt salt, socker, ev gurkmeja och nästan allt mjöl. Arbeta degen 10 minuter i maskin eller 15 minuter för hand.
+
+
+Låt jäsa 40 minuter under bakduk.
+
+Knåda degen lätt med resten av mjölet. Dela degen i 6 delar (för 6 st). Rulla till bollar. Lägg på en bakpappersklädd plåt. Tryck till lätt så de plattas till lite. Lägg över en bakduk och låt jäsa 30 minuter.
+
+Sätt ugnen på 225°C.
+
+Pensla bröden med uppvispat ägg och strö över sesamfröna.
+
+Grädda mitt i ugnen ca 10 minuter tills bröden får fin färg. Låt svalna på galler innan de delas.").unwrap();
+        assert_eq!(recept.rubrik(), "Klassiska hamburgerbröd");
+        assert_eq!(recept.källa(), None);
+        assert_eq!(recept.ugnstemperatur(), Some(&Storhet::värde(225.0).med_enhet("°C")));
+        assert_eq!(recept.tillagningstid(), Some(&Storhet::värde(60.0).större_än().med_enhet("minuter")));
+        assert_eq!(recept.storlek(), Some(&Storhet::värde(6.0).med_enhet("st")));
+        assert_eq!(recept.ingredienser(), &[
+            ingrediens(Some(Storhet::värde(0.5)), "paket jäst"),
+            ingrediens(Some(Storhet::värde(25.0).med_enhet("g")), "smör"),
+            ingrediens(Some(Storhet::värde(2.5).med_enhet("dl")), "mjölk"),
+            ingrediens(Some(Storhet::värde(0.5).med_enhet("tsk")), "salt"),
+            ingrediens(Some(Storhet::värde(0.5).med_enhet("tsk")), "strösocker"),
+            ingrediens(Some(Storhet::värde(1.0).med_enhet("krm")), "gurkmeja"),
+            ingrediens(Some(Storhet::värde(5.5).med_enhet("dl")), "vetemjöl special"),
+            ingrediens(Some(Storhet::värde(1.0)), "ägg"),
+            ingrediens(Some(Storhet::värde(1.0).med_enhet("msk")), "sesamfrön"),
+        ]);
+        assert_eq!(recept.steg(), vec![
+            "Smula jästen i en bunke. Smält smöret i en kastrull. Häll i mjölken och rör om. Värm till 37°C. Tillsätt vätskan i bunken och rör om tills jästen löst sig. Tillsätt salt, socker, ev gurkmeja och nästan allt mjöl. Arbeta degen 10 minuter i maskin eller 15 minuter för hand.",
+            "Låt jäsa 40 minuter under bakduk.",
+            "Knåda degen lätt med resten av mjölet. Dela degen i 6 delar (för 6 st). Rulla till bollar. Lägg på en bakpappersklädd plåt. Tryck till lätt så de plattas till lite. Lägg över en bakduk och låt jäsa 30 minuter.",
+            "Sätt ugnen på 225°C.",
+            "Pensla bröden med uppvispat ägg och strö över sesamfröna.",
+            "Grädda mitt i ugnen ca 10 minuter tills bröden får fin färg. Låt svalna på galler innan de delas."
         ]);
         assert_eq!(Recept::try_parse(recept.to_string()).unwrap(), recept);
     }

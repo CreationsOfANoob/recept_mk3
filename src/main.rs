@@ -206,8 +206,8 @@ impl ReceptApp {
             if self.flikval == flik_i {
                 match &self.scen {
                     Scen::ReceptBläddrare { editor: Some((EditorType::Portioner, editor)) } => {
-                        let mut portioner_rect = flik_rect.cut_mut(Side::Top, 4).with_inset(1, 0);
-                        commands.new_rect(CommandList::new(portioner_rect.cut_mut(Side::Bottom, 1))
+                        let mut portioner_rect = flik_rect.cut_mut(Side::Top, 5).with_inset(1, 0);
+                        commands.new_rect(CommandList::new(portioner_rect.cut_mut(Side::Bottom, 2))
                             .command(KeyCode::Up, Command::ÄndraTal(true))
                             .command(KeyCode::Down, Command::ÄndraTal(false)));
                         editor.render("Ny storlek...", portioner_rect.with_inset(2, 1), buf);

@@ -194,7 +194,7 @@ pub(super) fn parse_storhet(s: &str) -> Option<(Storhet, String)> {
 
     if let Some(stripped) = is_approx(&string) {
         string = stripped.trim().to_string();
-        parsed.cirka = true;
+        parsed.precision = super::Precision::Cirka;
     }
     let mut sign = 1;
     if let Some(stripped) = string.strip_prefix("-") {
@@ -207,7 +207,7 @@ pub(super) fn parse_storhet(s: &str) -> Option<(Storhet, String)> {
         let (pre, post) = string.split_at(hyph_i);
         let pre_num = parse_number(pre)?;
         let (post_num, remainder) = parse_number_remainder(post.strip_prefix("-").unwrap())?;
-        parsed.värde = Värde::Intervall(pre_num * sign as f32..post_num);
+        parsed.värde = Värde::intervall(pre_num * sign as f32, post_num);
         remainder
     } else {
         let (num, remainder) = parse_number_remainder(&string)?;

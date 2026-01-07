@@ -7,11 +7,11 @@
 - Portionsomräkning
 - Sidbrytning på recept
 - Prisberäkning
+- Mer naturlig inmatning
+- Timers?
+
 
 ## Struktur
-- Ändra sökgränssnitt så att det går att välja ett recept medan man söker, och när man går ur sök försvinner sökresultaten
-- Visa bara kommandon på rätt del av skärmen (sidebar, recept)
-- Deklarera tillgängliga kommandon i draw() istället för en egen funktion, och skicka med en Rect vari deras tooltips kan ritas.
 - Ändra så att mängder inte visas med decimaler, utan omvandlas till antingen bråk eller en mindre enhet
 
 
@@ -21,4 +21,5 @@
 
 
 ## Buggar
-250 –300 g frysta gröna ärtor  
+- Ugnstemp visas ej
+- Kommandon visas ej korrekt i portionsjust.
